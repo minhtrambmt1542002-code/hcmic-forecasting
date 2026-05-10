@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -510,4 +510,3 @@ if uploaded_file:
         file_name="EMS_Forecast_Matrix.csv",
         mime="text/csv"
     )
-```
