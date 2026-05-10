@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -5,48 +6,83 @@ import plotly.express as px
 
 from sklearn.linear_model import LinearRegression
 
+# =========================================================
+# PAGE CONFIG
+# =========================================================
+
 st.set_page_config(
-    page_title="HCMIC Forecasting",
+    page_title="HCMIC Forecasting System",
     layout="wide"
 )
 
-# ======================================================
+# =========================================================
 # TITLE
-# ======================================================
+# =========================================================
 
-st.title("📦 HCMIC Warehouse Forecasting & Optimization")
+st.title("📦 HCMIC EMS Forecasting & Warehouse Optimization")
 
 st.write(
-    "Data-driven EMS warehouse forecasting and optimization system"
+    """
+    Enterprise EMS Forecasting Planning System
+    """
 )
 
-# ======================================================
+# =========================================================
 # FILE UPLOAD
-# ======================================================
+# =========================================================
 
 uploaded_file = st.file_uploader(
-    "Upload EMS Excel File",
+    "Upload EMS Forecasting Dataset",
     type=["xlsx"]
 )
 
-# ======================================================
+# =========================================================
 # MAIN PROCESS
-# ======================================================
+# =========================================================
 
 if uploaded_file:
 
-    # ==================================================
-    # READ FILE
-    # ==================================================
+    # =====================================================
+    # READ DATA
+    # =====================================================
 
     df = pd.read_excel(uploaded_file)
 
-    st.subheader("📄 Raw Data")
+    st.subheader("📄 Raw Dataset")
+
     st.dataframe(df)
 
-    # ==================================================
+    # =====================================================
+    # REQUIRED COLUMNS
+    # =====================================================
+
+    required_cols = [
+        "Month",
+        "ProfitCenter",
+        "ProductionRevenue",
+        "RawMaterialInventory",
+        "ReceivingTransaction",
+        "LocationTransferTransaction",
+        "ShippingTransaction",
+        "FG_Pallet",
+        "RM_Pallet",
+        "NoOfBin"
+    ]
+
+    missing_cols = [
+        col for col in required_cols
+        if col not in df.columns
+    ]
+
+    if missing_cols:
+
+        st.error(f"Missing Columns: {missing_cols}")
+
+        st.stop()
+
+    # =====================================================
     # FEATURE ENGINEERING
-    # ==================================================
+    # =====================================================
 
     numeric_cols = [
         "ProductionRevenue",
@@ -59,58 +95,111 @@ if uploaded_file:
         "NoOfBin"
     ]
 
+    df = df.sort_values(
+        ["ProfitCenter", "Month"]
+    )
+
     for col in numeric_cols:
-        df[f"{col}_MA3"] = df[col].rolling(3).mean()
-        df[f"{col}_Lag1"] = df[col].shift(1)
+
+        df[f"{col}_Lag1"] = (
+            df.groupby("ProfitCenter")[col]
+            .shift(1)
+        )
+
+        df[f"{col}_MA3"] = (
+            df.groupby("ProfitCenter")[col]
+            .transform(
+                lambda x: x.rolling(3).mean()
+            )
+        )
 
     df = df.dropna()
 
     st.subheader("⚙️ Feature Engineering")
+
     st.dataframe(df)
 
-    # ==================================================
-    # FORECASTING MODELS
-    # ==================================================
+    # =====================================================
+    # FORECASTING FUNCTION
+    # =====================================================
 
-    st.subheader("📈 Forecasting Results")
+    def build_forecast(
+        target,
+        features
+    ):
 
-    # ==========================================
-    # 1. Forecast Production Revenue
-    # ==========================================
+        result = []
 
-    model_rev = LinearRegression()
+        customers = df["ProfitCenter"].unique()
 
-    X_rev = df[[
-        "ProductionRevenue_Lag1",
-        "ProductionRevenue_MA3"
-    ]]
+        for customer in customers:
 
-    y_rev = df["ProductionRevenue"]
+            temp = df[
+                df["ProfitCenter"] == customer
+            ].copy()
 
-    model_rev.fit(X_rev, y_rev)
+            if len(temp) < 4:
+                continue
 
-    df["Forecast_ProductionRevenue"] = model_rev.predict(X_rev)
+            X = temp[features]
 
-    # ==========================================
-    # 2. Forecast Raw Material Inventory
-    # ==========================================
+            y = temp[target]
 
-    model_rm = LinearRegression()
+            model = LinearRegression()
 
-    X_rm = df[[
-        "RawMaterialInventory_Lag1",
-        "RawMaterialInventory_MA3"
-    ]]
+            model.fit(X, y)
 
-    y_rm = df["RawMaterialInventory"]
+            temp[f"Forecast_{target}"] = (
+                model.predict(X)
+            )
 
-    model_rm.fit(X_rm, y_rm)
+            result.append(temp)
 
-    df["Forecast_RawMaterialInventory"] = model_rm.predict(X_rm)
+        if len(result) > 0:
 
-    # ==========================================
-    # 3. Forecast Receiving Transaction
-    # ==========================================
+            return pd.concat(result)
+
+        else:
+
+            return pd.DataFrame()
+
+    # =====================================================
+    # PRIMARY FORECASTS
+    # =====================================================
+
+    df_rev = build_forecast(
+        target="ProductionRevenue",
+        features=[
+            "ProductionRevenue_Lag1",
+            "ProductionRevenue_MA3"
+        ]
+    )
+
+    df_rm = build_forecast(
+        target="RawMaterialInventory",
+        features=[
+            "RawMaterialInventory_Lag1",
+            "RawMaterialInventory_MA3"
+        ]
+    )
+
+    # =====================================================
+    # MERGE PRIMARY FORECAST
+    # =====================================================
+
+    df["Forecast_ProductionRevenue"] = (
+        df_rev["Forecast_ProductionRevenue"]
+    )
+
+    df["Forecast_RawMaterialInventory"] = (
+        df_rm["Forecast_RawMaterialInventory"]
+    )
+
+    # =====================================================
+    # SECONDARY FORECASTS
+    # =====================================================
+
+    # Receiving Transaction
 
     model_receiving = LinearRegression()
 
@@ -118,15 +207,22 @@ if uploaded_file:
         "Forecast_RawMaterialInventory"
     ]]
 
-    y_receiving = df["ReceivingTransaction"]
+    y_receiving = df[
+        "ReceivingTransaction"
+    ]
 
-    model_receiving.fit(X_receiving, y_receiving)
+    model_receiving.fit(
+        X_receiving,
+        y_receiving
+    )
 
-    df["Forecast_ReceivingTransaction"] = model_receiving.predict(X_receiving)
+    df["Forecast_ReceivingTransaction"] = (
+        model_receiving.predict(
+            X_receiving
+        )
+    )
 
-    # ==========================================
-    # 4. Forecast Shipping Transaction
-    # ==========================================
+    # Shipping Transaction
 
     model_shipping = LinearRegression()
 
@@ -134,15 +230,22 @@ if uploaded_file:
         "Forecast_ProductionRevenue"
     ]]
 
-    y_shipping = df["ShippingTransaction"]
+    y_shipping = df[
+        "ShippingTransaction"
+    ]
 
-    model_shipping.fit(X_shipping, y_shipping)
+    model_shipping.fit(
+        X_shipping,
+        y_shipping
+    )
 
-    df["Forecast_ShippingTransaction"] = model_shipping.predict(X_shipping)
+    df["Forecast_ShippingTransaction"] = (
+        model_shipping.predict(
+            X_shipping
+        )
+    )
 
-    # ==========================================
-    # 5. Forecast Location Transfer
-    # ==========================================
+    # Location Transfer
 
     model_transfer = LinearRegression()
 
@@ -151,15 +254,22 @@ if uploaded_file:
         "Forecast_ReceivingTransaction"
     ]]
 
-    y_transfer = df["LocationTransferTransaction"]
+    y_transfer = df[
+        "LocationTransferTransaction"
+    ]
 
-    model_transfer.fit(X_transfer, y_transfer)
+    model_transfer.fit(
+        X_transfer,
+        y_transfer
+    )
 
-    df["Forecast_LocationTransfer"] = model_transfer.predict(X_transfer)
+    df["Forecast_LocationTransferTransaction"] = (
+        model_transfer.predict(
+            X_transfer
+        )
+    )
 
-    # ==========================================
-    # 6. Forecast FG Pallet
-    # ==========================================
+    # FG Pallet
 
     model_fg = LinearRegression()
 
@@ -172,11 +282,11 @@ if uploaded_file:
 
     model_fg.fit(X_fg, y_fg)
 
-    df["Forecast_FG_Pallet"] = model_fg.predict(X_fg)
+    df["Forecast_FG_Pallet"] = (
+        model_fg.predict(X_fg)
+    )
 
-    # ==========================================
-    # 7. Forecast RM Pallet
-    # ==========================================
+    # RM Pallet
 
     model_rm_pallet = LinearRegression()
 
@@ -186,13 +296,18 @@ if uploaded_file:
 
     y_rm_pallet = df["RM_Pallet"]
 
-    model_rm_pallet.fit(X_rm_pallet, y_rm_pallet)
+    model_rm_pallet.fit(
+        X_rm_pallet,
+        y_rm_pallet
+    )
 
-    df["Forecast_RM_Pallet"] = model_rm_pallet.predict(X_rm_pallet)
+    df["Forecast_RM_Pallet"] = (
+        model_rm_pallet.predict(
+            X_rm_pallet
+        )
+    )
 
-    # ==========================================
-    # 8. Forecast No Of Bin
-    # ==========================================
+    # Bin
 
     model_bin = LinearRegression()
 
@@ -204,50 +319,71 @@ if uploaded_file:
 
     model_bin.fit(X_bin, y_bin)
 
-    df["Forecast_NoOfBin"] = model_bin.predict(X_bin)
+    df["Forecast_NoOfBin"] = (
+        model_bin.predict(X_bin)
+    )
 
-    # ==================================================
+    # =====================================================
     # DERIVED METRICS
-    # ==================================================
+    # =====================================================
 
     df["Forecast_TotalTransaction"] = (
+
         df["Forecast_ReceivingTransaction"]
+
         + df["Forecast_ShippingTransaction"]
-        + df["Forecast_LocationTransfer"]
+
+        + df["Forecast_LocationTransferTransaction"]
+
     )
 
-    df["Forecast_TotalPallet"] = (
+    df["Forecast_NoOfPallet"] = (
+
         df["Forecast_FG_Pallet"]
+
         + df["Forecast_RM_Pallet"]
+
     )
 
-    # ==================================================
+    # =====================================================
     # WAREHOUSE CAPACITY
-    # ==================================================
+    # =====================================================
 
     df["WarehouseCapacity"] = (
-        df["Forecast_TotalPallet"] * 1.2
+
+        df["Forecast_NoOfPallet"]
+
+        * 1.2
+
     )
 
-    # ==================================================
+    # =====================================================
     # COST FUNCTION
-    # ==================================================
+    # =====================================================
 
     holding_cost = 2
     warehouse_cost = 1
     transaction_cost = 0.5
 
     df["WarehouseCost"] = (
-        df["Forecast_TotalPallet"] * holding_cost
-        + df["WarehouseCapacity"] * warehouse_cost
-        + df["Forecast_TotalTransaction"] * transaction_cost
+
+        df["Forecast_NoOfPallet"]
+
+        * holding_cost
+
+        + df["WarehouseCapacity"]
+
+        * warehouse_cost
+
+        + df["Forecast_TotalTransaction"]
+
+        * transaction_cost
+
     )
 
-    total_cost = df["WarehouseCost"].sum()
-
-    # ==================================================
+    # =====================================================
     # KPI SECTION
-    # ==================================================
+    # =====================================================
 
     st.subheader("📊 KPI Dashboard")
 
@@ -255,64 +391,123 @@ if uploaded_file:
 
     col1.metric(
         "Total Warehouse Cost",
-        f"{total_cost:,.2f}"
+        f"{df['WarehouseCost'].sum():,.0f}"
     )
 
     col2.metric(
         "Average Warehouse Capacity",
-        f"{df['WarehouseCapacity'].mean():,.2f}"
+        f"{df['WarehouseCapacity'].mean():,.0f}"
     )
 
     col3.metric(
-        "Average Total Transaction",
-        f"{df['Forecast_TotalTransaction'].mean():,.2f}"
+        "Average Transaction",
+        f"{df['Forecast_TotalTransaction'].mean():,.0f}"
     )
 
-    # ==================================================
-    # CHARTS
-    # ==================================================
+    # =====================================================
+    # PLANNING MATRIX
+    # =====================================================
+
+    st.subheader("📋 EMS Forecast Planning Matrix")
+
+    matrix_data = []
+
+    categories = {
+
+        "Production Revenue":
+            "Forecast_ProductionRevenue",
+
+        "130000 - Raw Materials Inventory":
+            "Forecast_RawMaterialInventory",
+
+        "Receiving transaction":
+            "Forecast_ReceivingTransaction",
+
+        "Location transfer transaction":
+            "Forecast_LocationTransferTransaction",
+
+        "Shipping transaction":
+            "Forecast_ShippingTransaction",
+
+        "Total transaction":
+            "Forecast_TotalTransaction",
+
+        "No. of Bin":
+            "Forecast_NoOfBin",
+
+        "No. of pallet":
+            "Forecast_NoOfPallet",
+
+        "FG Pallet":
+            "Forecast_FG_Pallet",
+
+        "Raw Material Pallet":
+            "Forecast_RM_Pallet"
+
+    }
+
+    for category, forecast_col in categories.items():
+
+        for customer in df["ProfitCenter"].unique():
+
+            temp = df[
+                df["ProfitCenter"] == customer
+            ]
+
+            row = {
+                "Categories": category,
+                "ProfitCenter": customer
+            }
+
+            for _, r in temp.iterrows():
+
+                row[r["Month"]] = round(
+                    r[forecast_col],
+                    0
+                )
+
+            matrix_data.append(row)
+
+    matrix_df = pd.DataFrame(matrix_data)
+
+    st.dataframe(
+        matrix_df,
+        use_container_width=True
+    )
+
+    # =====================================================
+    # VISUALIZATION
+    # =====================================================
 
     st.subheader("📈 Forecast Visualization")
 
     fig = px.line(
         df,
         x="Month",
-        y=[
-            "ProductionRevenue",
-            "Forecast_ProductionRevenue"
-        ],
+        y="Forecast_ProductionRevenue",
+        color="ProfitCenter",
         title="Production Revenue Forecast"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
-
-    fig2 = px.line(
-        df,
-        x="Month",
-        y=[
-            "Forecast_TotalTransaction"
-        ],
-        title="Forecast Total Transaction"
+    st.plotly_chart(
+        fig,
+        use_container_width=True
     )
 
-    st.plotly_chart(fig2, use_container_width=True)
+    # =====================================================
+    # EXPORT
+    # =====================================================
 
-    fig3 = px.line(
-        df,
-        x="Month",
-        y=[
-            "WarehouseCapacity"
-        ],
-        title="Warehouse Capacity"
+    st.subheader("📥 Download Forecast Matrix")
+
+    csv = matrix_df.to_csv(
+        index=False
+    ).encode("utf-8")
+
+    st.download_button(
+        label="Download Forecast Matrix CSV",
+        data=csv,
+        file_name="EMS_Forecast_Matrix.csv",
+        mime="text/csv"
     )
-
-    st.plotly_chart(fig3, use_container_width=True)
-
-    # ==================================================
-    # FINAL OUTPUT
-    # ==================================================
-
-    st.subheader("✅ Final Forecast Output")
-
-    st.dataframe(df)
-
+```
