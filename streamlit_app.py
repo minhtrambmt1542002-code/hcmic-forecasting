@@ -1,10 +1,7 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-
-from sklearn.linear_model import LinearRegression
 
 # =========================================================
 # PAGE CONFIG
@@ -81,308 +78,263 @@ if uploaded_file:
         st.stop()
 
     # =====================================================
-    # FEATURE ENGINEERING
+    # REMOVE INACTIVE CUSTOMERS
     # =====================================================
 
-    numeric_cols = [
-        "ProductionRevenue",
-        "RawMaterialInventory",
-        "ReceivingTransaction",
-        "LocationTransferTransaction",
-        "ShippingTransaction",
-        "FG_Pallet",
-        "RM_Pallet",
-        "NoOfBin"
+    df["TotalActivity"] = (
+
+        df["ProductionRevenue"]
+
+        + df["RawMaterialInventory"]
+
+        + df["ReceivingTransaction"]
+
+        + df["ShippingTransaction"]
+
+    )
+
+    df = df[
+        df["TotalActivity"] > 0
     ]
+
+    # =====================================================
+    # SORT DATA
+    # =====================================================
 
     df = df.sort_values(
         ["ProfitCenter", "Month"]
     )
 
-    for col in numeric_cols:
-
-        df[f"{col}_Lag1"] = (
-            df.groupby("ProfitCenter")[col]
-            .shift(1)
-        )
-
-        df[f"{col}_MA3"] = (
-            df.groupby("ProfitCenter")[col]
-            .transform(
-                lambda x: x.rolling(3).mean()
-            )
-        )
-
-    df = df.dropna()
-
-    st.subheader("⚙️ Feature Engineering")
-
-    st.dataframe(df)
-
     # =====================================================
-    # FORECASTING FUNCTION
+    # FORECAST ENGINE
     # =====================================================
 
-    def build_forecast(
-        target,
-        features
-    ):
+    forecast_rows = []
 
-        result = []
+    future_months = [
+        "Sep26",
+        "Oct26",
+        "Nov26",
+        "Dec26",
+        "Jan27",
+        "Feb27",
+        "Mar27",
+        "Apr27",
+        "May27",
+        "Jun27",
+        "Jul27",
+        "Aug27"
+    ]
 
-        customers = df["ProfitCenter"].unique()
+    customers = df["ProfitCenter"].unique()
 
-        for customer in customers:
+    for customer in customers:
 
-            temp = df[
-                df["ProfitCenter"] == customer
-            ].copy()
+        temp = df[
+            df["ProfitCenter"] == customer
+        ].copy()
 
-            if len(temp) < 2:
-                continue
+        # =============================================
+        # LAST VALUES
+        # =============================================
 
-            X = temp[features]
+        last_rev = (
+            temp["ProductionRevenue"]
+            .iloc[-1]
+        )
 
-            y = temp[target]
+        last_rm = (
+            temp["RawMaterialInventory"]
+            .iloc[-1]
+        )
 
-            model = LinearRegression()
+        # =============================================
+        # GROWTH RATE
+        # =============================================
 
-            model.fit(X, y)
+        if len(temp) >= 2:
 
-            temp[f"Forecast_{target}"] = (
-                model.predict(X)
+            rev_growth = (
+
+                temp["ProductionRevenue"]
+                .pct_change()
+                .mean()
+
             )
 
-            result.append(temp)
+            rm_growth = (
 
-        if len(result) > 0:
+                temp["RawMaterialInventory"]
+                .pct_change()
+                .mean()
 
-            return pd.concat(result)
+            )
 
         else:
 
-            return pd.DataFrame()
+            rev_growth = 0.03
+            rm_growth = 0.03
+
+        # CLEAN EXTREME VALUES
+
+        if np.isnan(rev_growth):
+            rev_growth = 0.03
+
+        if np.isnan(rm_growth):
+            rm_growth = 0.03
+
+        if rev_growth > 0.3:
+            rev_growth = 0.3
+
+        if rev_growth < -0.3:
+            rev_growth = -0.3
+
+        if rm_growth > 0.3:
+            rm_growth = 0.3
+
+        if rm_growth < -0.3:
+            rm_growth = -0.3
+
+        # =============================================
+        # FORECAST FUTURE
+        # =============================================
+
+        for month in future_months:
+
+            # =========================================
+            # PRIMARY FORECAST
+            # =========================================
+
+            last_rev = (
+                last_rev
+                * (1 + rev_growth)
+            )
+
+            last_rm = (
+                last_rm
+                * (1 + rm_growth)
+            )
+
+            # =========================================
+            # OPERATIONAL RATIOS
+            # =========================================
+
+            receiving = (
+                last_rm * 0.002
+            )
+
+            shipping = (
+                last_rev * 0.0015
+            )
+
+            transfer = (
+                receiving * 1.2
+            )
+
+            fg_pallet = (
+                last_rev / 100000
+            )
+
+            rm_pallet = (
+                last_rm / 120000
+            )
+
+            no_of_bin = (
+                last_rm / 50000
+            )
+
+            # =========================================
+            # DERIVED METRICS
+            # =========================================
+
+            total_transaction = (
+
+                receiving
+
+                + shipping
+
+                + transfer
+
+            )
+
+            no_of_pallet = (
+
+                fg_pallet
+
+                + rm_pallet
+
+            )
+
+            warehouse_capacity = (
+                no_of_pallet * 1.2
+            )
+
+            warehouse_cost = (
+
+                warehouse_capacity * 2
+
+                + total_transaction * 0.5
+
+            )
+
+            # =========================================
+            # SAVE ROW
+            # =========================================
+
+            forecast_rows.append({
+
+                "Month": month,
+
+                "ProfitCenter": customer,
+
+                "ProductionRevenue":
+                    round(last_rev, 0),
+
+                "RawMaterialInventory":
+                    round(last_rm, 0),
+
+                "ReceivingTransaction":
+                    round(receiving, 0),
+
+                "LocationTransferTransaction":
+                    round(transfer, 0),
+
+                "ShippingTransaction":
+                    round(shipping, 0),
+
+                "TotalTransaction":
+                    round(total_transaction, 0),
+
+                "FG_Pallet":
+                    round(fg_pallet, 0),
+
+                "RM_Pallet":
+                    round(rm_pallet, 0),
+
+                "NoOfPallet":
+                    round(no_of_pallet, 0),
+
+                "NoOfBin":
+                    round(no_of_bin, 0),
+
+                "WarehouseCapacity":
+                    round(warehouse_capacity, 0),
+
+                "WarehouseCost":
+                    round(warehouse_cost, 0)
+
+            })
 
     # =====================================================
-    # PRIMARY FORECASTS
+    # FORECAST DATAFRAME
     # =====================================================
 
-    df_rev = build_forecast(
-        target="ProductionRevenue",
-        features=[
-            "ProductionRevenue_Lag1",
-            "ProductionRevenue_MA3"
-        ]
-    )
-
-    df_rm = build_forecast(
-        target="RawMaterialInventory",
-        features=[
-            "RawMaterialInventory_Lag1",
-            "RawMaterialInventory_MA3"
-        ]
-    )
-
-    # =====================================================
-    # MERGE PRIMARY FORECAST
-    # =====================================================
-
-    df["Forecast_ProductionRevenue"] = (
-        df_rev["Forecast_ProductionRevenue"]
-    )
-
-    df["Forecast_RawMaterialInventory"] = (
-        df_rm["Forecast_RawMaterialInventory"]
-    )
-
-    # =====================================================
-    # SECONDARY FORECASTS
-    # =====================================================
-
-    # Receiving Transaction
-
-    model_receiving = LinearRegression()
-
-    X_receiving = df[[
-        "Forecast_RawMaterialInventory"
-    ]]
-
-    y_receiving = df[
-        "ReceivingTransaction"
-    ]
-
-    model_receiving.fit(
-        X_receiving,
-        y_receiving
-    )
-
-    df["Forecast_ReceivingTransaction"] = (
-        model_receiving.predict(
-            X_receiving
-        )
-    )
-
-    # Shipping Transaction
-
-    model_shipping = LinearRegression()
-
-    X_shipping = df[[
-        "Forecast_ProductionRevenue"
-    ]]
-
-    y_shipping = df[
-        "ShippingTransaction"
-    ]
-
-    model_shipping.fit(
-        X_shipping,
-        y_shipping
-    )
-
-    df["Forecast_ShippingTransaction"] = (
-        model_shipping.predict(
-            X_shipping
-        )
-    )
-
-    # Location Transfer
-
-    model_transfer = LinearRegression()
-
-    X_transfer = df[[
-        "Forecast_ProductionRevenue",
-        "Forecast_ReceivingTransaction"
-    ]]
-
-    y_transfer = df[
-        "LocationTransferTransaction"
-    ]
-
-    model_transfer.fit(
-        X_transfer,
-        y_transfer
-    )
-
-    df["Forecast_LocationTransferTransaction"] = (
-        model_transfer.predict(
-            X_transfer
-        )
-    )
-
-    # FG Pallet
-
-    model_fg = LinearRegression()
-
-    X_fg = df[[
-        "Forecast_ProductionRevenue",
-        "Forecast_ReceivingTransaction"
-    ]]
-
-    y_fg = df["FG_Pallet"]
-
-    model_fg.fit(X_fg, y_fg)
-
-    df["Forecast_FG_Pallet"] = (
-        model_fg.predict(X_fg)
-    )
-
-    # RM Pallet
-
-    model_rm_pallet = LinearRegression()
-
-    X_rm_pallet = df[[
-        "Forecast_RawMaterialInventory"
-    ]]
-
-    y_rm_pallet = df["RM_Pallet"]
-
-    model_rm_pallet.fit(
-        X_rm_pallet,
-        y_rm_pallet
-    )
-
-    df["Forecast_RM_Pallet"] = (
-        model_rm_pallet.predict(
-            X_rm_pallet
-        )
-    )
-
-    # Bin
-
-    model_bin = LinearRegression()
-
-    X_bin = df[[
-        "Forecast_RawMaterialInventory"
-    ]]
-
-    y_bin = df["NoOfBin"]
-
-    model_bin.fit(X_bin, y_bin)
-
-    df["Forecast_NoOfBin"] = (
-        model_bin.predict(X_bin)
-    )
-
-    # =====================================================
-    # DERIVED METRICS
-    # =====================================================
-
-    df["Forecast_TotalTransaction"] = (
-
-        df["Forecast_ReceivingTransaction"]
-
-        + df["Forecast_ShippingTransaction"]
-
-        + df["Forecast_LocationTransferTransaction"]
-
-    )
-
-    df["Forecast_NoOfPallet"] = (
-
-        df["Forecast_FG_Pallet"]
-
-        + df["Forecast_RM_Pallet"]
-
+    forecast_df = pd.DataFrame(
+        forecast_rows
     )
 
     # =====================================================
-    # WAREHOUSE CAPACITY
-    # =====================================================
-
-    df["WarehouseCapacity"] = (
-
-        df["Forecast_NoOfPallet"]
-
-        * 1.2
-
-    )
-
-    # =====================================================
-    # COST FUNCTION
-    # =====================================================
-
-    holding_cost = 2
-    warehouse_cost = 1
-    transaction_cost = 0.5
-
-    df["WarehouseCost"] = (
-
-        df["Forecast_NoOfPallet"]
-
-        * holding_cost
-
-        + df["WarehouseCapacity"]
-
-        * warehouse_cost
-
-        + df["Forecast_TotalTransaction"]
-
-        * transaction_cost
-
-    )
-
-    # =====================================================
-    # KPI SECTION
+    # KPI DASHBOARD
     # =====================================================
 
     st.subheader("📊 KPI Dashboard")
@@ -391,17 +343,17 @@ if uploaded_file:
 
     col1.metric(
         "Total Warehouse Cost",
-        f"{df['WarehouseCost'].sum():,.0f}"
+        f"{forecast_df['WarehouseCost'].sum():,.0f}"
     )
 
     col2.metric(
         "Average Warehouse Capacity",
-        f"{df['WarehouseCapacity'].mean():,.0f}"
+        f"{forecast_df['WarehouseCapacity'].mean():,.0f}"
     )
 
     col3.metric(
         "Average Transaction",
-        f"{df['Forecast_TotalTransaction'].mean():,.0f}"
+        f"{forecast_df['TotalTransaction'].mean():,.0f}"
     )
 
     # =====================================================
@@ -410,65 +362,70 @@ if uploaded_file:
 
     st.subheader("📋 EMS Forecast Planning Matrix")
 
-    matrix_data = []
-
     categories = {
 
         "Production Revenue":
-            "Forecast_ProductionRevenue",
+            "ProductionRevenue",
 
         "130000 - Raw Materials Inventory":
-            "Forecast_RawMaterialInventory",
+            "RawMaterialInventory",
 
         "Receiving transaction":
-            "Forecast_ReceivingTransaction",
+            "ReceivingTransaction",
 
         "Location transfer transaction":
-            "Forecast_LocationTransferTransaction",
+            "LocationTransferTransaction",
 
         "Shipping transaction":
-            "Forecast_ShippingTransaction",
+            "ShippingTransaction",
 
         "Total transaction":
-            "Forecast_TotalTransaction",
+            "TotalTransaction",
 
         "No. of Bin":
-            "Forecast_NoOfBin",
+            "NoOfBin",
 
         "No. of pallet":
-            "Forecast_NoOfPallet",
+            "NoOfPallet",
 
         "FG Pallet":
-            "Forecast_FG_Pallet",
+            "FG_Pallet",
 
         "Raw Material Pallet":
-            "Forecast_RM_Pallet"
+            "RM_Pallet"
 
     }
 
-    for category, forecast_col in categories.items():
+    matrix_data = []
 
-        for customer in df["ProfitCenter"].unique():
+    for category, col_name in categories.items():
 
-            temp = df[
-                df["ProfitCenter"] == customer
+        for customer in customers:
+
+            temp = forecast_df[
+                forecast_df["ProfitCenter"]
+                == customer
             ]
 
             row = {
+
                 "Categories": category,
+
                 "ProfitCenter": customer
+
             }
 
             for _, r in temp.iterrows():
 
-                row[r["Month"]] = round(
-                    r[forecast_col],
-                    0
+                row[r["Month"]] = (
+                    round(r[col_name], 0)
                 )
 
             matrix_data.append(row)
 
-    matrix_df = pd.DataFrame(matrix_data)
+    matrix_df = pd.DataFrame(
+        matrix_data
+    )
 
     st.dataframe(
         matrix_df,
@@ -479,12 +436,12 @@ if uploaded_file:
     # VISUALIZATION
     # =====================================================
 
-    st.subheader("📈 Forecast Visualization")
+    st.subheader("📈 Revenue Forecast")
 
     fig = px.line(
-        df,
+        forecast_df,
         x="Month",
-        y="Forecast_ProductionRevenue",
+        y="ProductionRevenue",
         color="ProfitCenter",
         title="Production Revenue Forecast"
     )
@@ -495,7 +452,7 @@ if uploaded_file:
     )
 
     # =====================================================
-    # EXPORT
+    # DOWNLOAD
     # =====================================================
 
     st.subheader("📥 Download Forecast Matrix")
