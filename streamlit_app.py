@@ -138,7 +138,7 @@ if uploaded_file:
                 df["ProfitCenter"] == customer
             ].copy()
 
-            if len(temp) < 4:
+            if len(temp) < 2:
                 continue
 
             X = temp[features]
