@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -78,6 +79,30 @@ if uploaded_file:
         st.stop()
 
     # =====================================================
+    # CLEAN DATA
+    # =====================================================
+
+    numeric_cols = [
+        "ProductionRevenue",
+        "RawMaterialInventory",
+        "ReceivingTransaction",
+        "LocationTransferTransaction",
+        "ShippingTransaction",
+        "FG_Pallet",
+        "RM_Pallet",
+        "NoOfBin"
+    ]
+
+    for col in numeric_cols:
+
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    df = df.fillna(0)
+
+    # =====================================================
     # REMOVE INACTIVE CUSTOMERS
     # =====================================================
 
@@ -106,6 +131,12 @@ if uploaded_file:
     )
 
     # =====================================================
+    # CUSTOMER LIST
+    # =====================================================
+
+    customers = df["ProfitCenter"].unique()
+
+    # =====================================================
     # FORECAST ENGINE
     # =====================================================
 
@@ -126,13 +157,18 @@ if uploaded_file:
         "Aug27"
     ]
 
-    customers = df["ProfitCenter"].unique()
-
     for customer in customers:
 
         temp = df[
             df["ProfitCenter"] == customer
         ].copy()
+
+        # =============================================
+        # SKIP EMPTY
+        # =============================================
+
+        if temp.empty:
+            continue
 
         # =============================================
         # LAST VALUES
@@ -175,7 +211,9 @@ if uploaded_file:
             rev_growth = 0.03
             rm_growth = 0.03
 
-        # CLEAN EXTREME VALUES
+        # =============================================
+        # CLEAN GROWTH RATE
+        # =============================================
 
         if np.isnan(rev_growth):
             rev_growth = 0.03
@@ -183,17 +221,15 @@ if uploaded_file:
         if np.isnan(rm_growth):
             rm_growth = 0.03
 
-        if rev_growth > 0.3:
-            rev_growth = 0.3
+        rev_growth = max(
+            min(rev_growth, 0.3),
+            -0.3
+        )
 
-        if rev_growth < -0.3:
-            rev_growth = -0.3
-
-        if rm_growth > 0.3:
-            rm_growth = 0.3
-
-        if rm_growth < -0.3:
-            rm_growth = -0.3
+        rm_growth = max(
+            min(rm_growth, 0.3),
+            -0.3
+        )
 
         # =============================================
         # FORECAST FUTURE
@@ -278,7 +314,7 @@ if uploaded_file:
             )
 
             # =========================================
-            # SAVE ROW
+            # SAVE FORECAST ROW
             # =========================================
 
             forecast_rows.append({
@@ -332,6 +368,18 @@ if uploaded_file:
     forecast_df = pd.DataFrame(
         forecast_rows
     )
+
+    # =====================================================
+    # CHECK FORECAST RESULT
+    # =====================================================
+
+    if forecast_df.empty:
+
+        st.error(
+            "No forecast data generated."
+        )
+
+        st.stop()
 
     # =====================================================
     # KPI DASHBOARD
@@ -407,6 +455,9 @@ if uploaded_file:
                 == customer
             ]
 
+            if temp.empty:
+                continue
+
             row = {
 
                 "Categories": category,
@@ -452,6 +503,17 @@ if uploaded_file:
     )
 
     # =====================================================
+    # FORECAST TABLE
+    # =====================================================
+
+    st.subheader("📄 Forecast Dataset")
+
+    st.dataframe(
+        forecast_df,
+        use_container_width=True
+    )
+
+    # =====================================================
     # DOWNLOAD
     # =====================================================
 
@@ -467,3 +529,4 @@ if uploaded_file:
         file_name="EMS_Forecast_Matrix.csv",
         mime="text/csv"
     )
+```
