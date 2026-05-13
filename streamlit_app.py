@@ -162,125 +162,186 @@ if uploaded_file:
             df["ProfitCenter"] == customer
         ].copy()
 
-        # =============================================
-        # SKIP EMPTY
-        # =============================================
-
         if temp.empty:
             continue
 
-        # =============================================
-        # LAST VALUES
-        # =============================================
+        # =================================================
+        # MOVING AVERAGE FORECAST
+        # =================================================
 
-        last_rev = (
+        forecast_rev = (
             temp["ProductionRevenue"]
-            .iloc[-1]
+            .tail(3)
+            .mean()
         )
 
-        last_rm = (
+        forecast_rm = (
             temp["RawMaterialInventory"]
-            .iloc[-1]
+            .tail(3)
+            .mean()
         )
 
-        # =============================================
-        # GROWTH RATE
-        # =============================================
+        # =================================================
+        # STABILIZE IF NAN
+        # =================================================
 
-        if len(temp) >= 2:
+        if np.isnan(forecast_rev):
+            forecast_rev = 0
 
-            rev_growth = (
+        if np.isnan(forecast_rm):
+            forecast_rm = 0
 
-                temp["ProductionRevenue"]
-                .pct_change()
-                .mean()
+        # =================================================
+        # OPERATIONAL RATIOS
+        # =================================================
 
+        avg_receiving_ratio = (
+
+            temp["ReceivingTransaction"].sum()
+
+            /
+
+            max(
+                temp["RawMaterialInventory"].sum(),
+                1
             )
 
-            rm_growth = (
+        )
 
-                temp["RawMaterialInventory"]
-                .pct_change()
-                .mean()
+        avg_shipping_ratio = (
 
+            temp["ShippingTransaction"].sum()
+
+            /
+
+            max(
+                temp["ProductionRevenue"].sum(),
+                1
             )
 
-        else:
-
-            rev_growth = 0.03
-            rm_growth = 0.03
-
-        # =============================================
-        # CLEAN GROWTH RATE
-        # =============================================
-
-        if np.isnan(rev_growth):
-            rev_growth = 0.03
-
-        if np.isnan(rm_growth):
-            rm_growth = 0.03
-
-        rev_growth = max(
-            min(rev_growth, 0.3),
-            -0.3
         )
 
-        rm_growth = max(
-            min(rm_growth, 0.3),
-            -0.3
+        avg_transfer_ratio = (
+
+            temp["LocationTransferTransaction"].sum()
+
+            /
+
+            max(
+                temp["ReceivingTransaction"].sum(),
+                1
+            )
+
         )
 
-        # =============================================
+        avg_fg_ratio = (
+
+            temp["FG_Pallet"].sum()
+
+            /
+
+            max(
+                temp["ProductionRevenue"].sum(),
+                1
+            )
+
+        )
+
+        avg_rm_ratio = (
+
+            temp["RM_Pallet"].sum()
+
+            /
+
+            max(
+                temp["RawMaterialInventory"].sum(),
+                1
+            )
+
+        )
+
+        avg_bin_ratio = (
+
+            temp["NoOfBin"].sum()
+
+            /
+
+            max(
+                temp["RawMaterialInventory"].sum(),
+                1
+            )
+
+        )
+
+        # =================================================
         # FORECAST FUTURE
-        # =============================================
+        # =================================================
 
         for month in future_months:
 
-            # =========================================
-            # PRIMARY FORECAST
-            # =========================================
+            # =============================================
+            # MAIN FORECAST
+            # =============================================
 
-            last_rev = (
-                last_rev
-                * (1 + rev_growth)
-            )
+            production_revenue = forecast_rev
 
-            last_rm = (
-                last_rm
-                * (1 + rm_growth)
-            )
+            raw_material = forecast_rm
 
-            # =========================================
-            # OPERATIONAL RATIOS
-            # =========================================
+            # =============================================
+            # OPERATIONAL FORECAST
+            # =============================================
 
             receiving = (
-                last_rm * 0.002
+
+                raw_material
+
+                * avg_receiving_ratio
+
             )
 
             shipping = (
-                last_rev * 0.0015
+
+                production_revenue
+
+                * avg_shipping_ratio
+
             )
 
             transfer = (
-                receiving * 1.2
+
+                receiving
+
+                * avg_transfer_ratio
+
             )
 
             fg_pallet = (
-                last_rev / 100000
+
+                production_revenue
+
+                * avg_fg_ratio
+
             )
 
             rm_pallet = (
-                last_rm / 120000
+
+                raw_material
+
+                * avg_rm_ratio
+
             )
 
             no_of_bin = (
-                last_rm / 50000
+
+                raw_material
+
+                * avg_bin_ratio
+
             )
 
-            # =========================================
+            # =============================================
             # DERIVED METRICS
-            # =========================================
+            # =============================================
 
             total_transaction = (
 
@@ -312,9 +373,9 @@ if uploaded_file:
 
             )
 
-            # =========================================
-            # SAVE FORECAST ROW
-            # =========================================
+            # =============================================
+            # SAVE FORECAST
+            # =============================================
 
             forecast_rows.append({
 
@@ -323,10 +384,10 @@ if uploaded_file:
                 "ProfitCenter": customer,
 
                 "ProductionRevenue":
-                    round(last_rev, 0),
+                    round(production_revenue, 0),
 
                 "RawMaterialInventory":
-                    round(last_rm, 0),
+                    round(raw_material, 0),
 
                 "ReceivingTransaction":
                     round(receiving, 0),
@@ -369,13 +430,13 @@ if uploaded_file:
     )
 
     # =====================================================
-    # CHECK FORECAST RESULT
+    # CHECK FORECAST
     # =====================================================
 
     if forecast_df.empty:
 
         st.error(
-            "No forecast data generated."
+            "No forecast generated."
         )
 
         st.stop()
@@ -477,13 +538,17 @@ if uploaded_file:
         matrix_data
     )
 
+    # =====================================================
+    # DISPLAY MATRIX
+    # =====================================================
+
     st.dataframe(
         matrix_df,
         use_container_width=True
     )
 
     # =====================================================
-    # VISUALIZATION
+    # CHART
     # =====================================================
 
     st.subheader("📈 Revenue Forecast")
@@ -502,7 +567,7 @@ if uploaded_file:
     )
 
     # =====================================================
-    # FORECAST TABLE
+    # FORECAST DATA
     # =====================================================
 
     st.subheader("📄 Forecast Dataset")
