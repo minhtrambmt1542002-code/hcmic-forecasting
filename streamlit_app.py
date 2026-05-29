@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -130,6 +131,35 @@ if uploaded_file:
     )
 
     # =====================================================
+    # FEATURE ENGINEERING
+    # =====================================================
+
+    st.subheader("⚙️ Feature Engineering")
+
+    df["Revenue_Lag1"] = (
+        df.groupby("ProfitCenter")
+        ["ProductionRevenue"]
+        .shift(1)
+    )
+
+    df["Revenue_Lag2"] = (
+        df.groupby("ProfitCenter")
+        ["ProductionRevenue"]
+        .shift(2)
+    )
+
+    df["Revenue_MA3"] = (
+        df.groupby("ProfitCenter")
+        ["ProductionRevenue"]
+        .transform(
+            lambda x:
+            x.rolling(3).mean()
+        )
+    )
+
+    st.dataframe(df.head())
+
+    # =====================================================
     # CUSTOMER LIST
     # =====================================================
 
@@ -156,40 +186,30 @@ if uploaded_file:
         "Aug27"
     ]
 
+    # =====================================================
+    # LOOP CUSTOMER
+    # =====================================================
+
     for customer in customers:
 
         temp = df[
             df["ProfitCenter"] == customer
         ].copy()
 
-        if temp.empty:
+        if len(temp) < 3:
             continue
 
         # =================================================
-        # MOVING AVERAGE FORECAST
+        # INITIAL HISTORY
         # =================================================
 
-        forecast_rev = (
-            temp["ProductionRevenue"]
-            .tail(3)
-            .mean()
+        rev_history = list(
+            temp["ProductionRevenue"].tail(3)
         )
 
-        forecast_rm = (
-            temp["RawMaterialInventory"]
-            .tail(3)
-            .mean()
+        rm_history = list(
+            temp["RawMaterialInventory"].tail(3)
         )
-
-        # =================================================
-        # STABILIZE IF NAN
-        # =================================================
-
-        if np.isnan(forecast_rev):
-            forecast_rev = 0
-
-        if np.isnan(forecast_rm):
-            forecast_rm = 0
 
         # =================================================
         # OPERATIONAL RATIOS
@@ -280,12 +300,28 @@ if uploaded_file:
         for month in future_months:
 
             # =============================================
-            # MAIN FORECAST
+            # MOVING AVERAGE FORECAST
             # =============================================
 
-            production_revenue = forecast_rev
+            production_revenue = np.mean(
+                rev_history[-3:]
+            )
 
-            raw_material = forecast_rm
+            raw_material = np.mean(
+                rm_history[-3:]
+            )
+
+            # =============================================
+            # FORECAST EVOLUTION
+            # =============================================
+
+            rev_history.append(
+                production_revenue
+            )
+
+            rm_history.append(
+                raw_material
+            )
 
             # =============================================
             # OPERATIONAL FORECAST
@@ -428,18 +464,6 @@ if uploaded_file:
     forecast_df = pd.DataFrame(
         forecast_rows
     )
-
-    # =====================================================
-    # CHECK FORECAST
-    # =====================================================
-
-    if forecast_df.empty:
-
-        st.error(
-            "No forecast generated."
-        )
-
-        st.stop()
 
     # =====================================================
     # KPI DASHBOARD
