@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
 # =========================================================
 # PAGE CONFIG
 # =========================================================
@@ -196,20 +198,46 @@ if uploaded_file:
             df["ProfitCenter"] == customer
         ].copy()
 
-        if len(temp) < 3:
+        if len(temp) < 6:
             continue
 
         # =================================================
-        # INITIAL HISTORY
+        # HOLT-WINTERS FORECAST
         # =================================================
 
-        rev_history = list(
-            temp["ProductionRevenue"].tail(3)
-        )
+        try:
 
-        rm_history = list(
-            temp["RawMaterialInventory"].tail(3)
-        )
+            model_rev = ExponentialSmoothing(
+                temp["ProductionRevenue"],
+                trend='add',
+                seasonal='add',
+                seasonal_periods=4
+            ).fit()
+
+            forecast_rev = model_rev.forecast(12)
+
+        except:
+
+            forecast_rev = pd.Series(
+                [temp["ProductionRevenue"].mean()] * 12
+            )
+
+        try:
+
+            model_rm = ExponentialSmoothing(
+                temp["RawMaterialInventory"],
+                trend='add',
+                seasonal='add',
+                seasonal_periods=4
+            ).fit()
+
+            forecast_rm = model_rm.forecast(12)
+
+        except:
+
+            forecast_rm = pd.Series(
+                [temp["RawMaterialInventory"].mean()] * 12
+            )
 
         # =================================================
         # OPERATIONAL RATIOS
@@ -297,30 +325,14 @@ if uploaded_file:
         # FORECAST FUTURE
         # =================================================
 
-        for month in future_months:
+        for i, month in enumerate(future_months):
 
-            # =============================================
-            # MOVING AVERAGE FORECAST
-            # =============================================
-
-            production_revenue = np.mean(
-                rev_history[-3:]
+            production_revenue = (
+                forecast_rev.iloc[i]
             )
 
-            raw_material = np.mean(
-                rm_history[-3:]
-            )
-
-            # =============================================
-            # FORECAST EVOLUTION
-            # =============================================
-
-            rev_history.append(
-                production_revenue
-            )
-
-            rm_history.append(
-                raw_material
+            raw_material = (
+                forecast_rm.iloc[i]
             )
 
             # =============================================
@@ -464,6 +476,14 @@ if uploaded_file:
     forecast_df = pd.DataFrame(
         forecast_rows
     )
+
+    if forecast_df.empty:
+
+        st.error(
+            "No forecast generated."
+        )
+
+        st.stop()
 
     # =====================================================
     # KPI DASHBOARD
