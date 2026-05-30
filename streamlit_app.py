@@ -193,8 +193,26 @@ if uploaded_file:
         )
 
         df = df.fillna(0)
+# =====================================================
+# FEATURE ENGINEERING DISPLAY
+# =====================================================
 
-        st.dataframe(df.head())
+st.subheader("⚙️ Feature Engineering")
+
+selected_customer = st.selectbox(
+    "Select ProfitCenter for Feature Engineering",
+    customers
+)
+
+feature_df = df[
+    df["ProfitCenter"]
+    == selected_customer
+]
+
+st.dataframe(
+    feature_df,
+    use_container_width=True
+)
 
         # =====================================================
         # CUSTOMER LIST
