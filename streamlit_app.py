@@ -167,19 +167,19 @@ if uploaded_file:
         # =====================================================
         # RAW MATERIAL FEATURE ENGINEERING
         # =====================================================
-        
+
         df["RM_Lag1"] = (
             df.groupby("ProfitCenter")
             ["RawMaterialInventory"]
             .shift(1)
         )
-        
+
         df["RM_Lag2"] = (
             df.groupby("ProfitCenter")
             ["RawMaterialInventory"]
             .shift(2)
         )
-        
+
         df["RM_MA3"] = (
             df.groupby("ProfitCenter")
             ["RawMaterialInventory"]
@@ -188,7 +188,7 @@ if uploaded_file:
                 x.rolling(3).mean()
             )
         )
-        
+
         df = df.fillna(0)
 
         # =====================================================
@@ -278,6 +278,94 @@ if uploaded_file:
                 "Low Demand"
 
             )
+
+        )
+
+        # =====================================================
+        # VARIANCE ANALYSIS
+        # =====================================================
+
+        customer_variance = (
+
+            df.groupby("ProfitCenter")
+
+            .agg({
+
+                "RawMaterialInventory": [
+                    "mean",
+                    "std"
+                ]
+
+            })
+
+        )
+
+        customer_variance.columns = [
+            "RM_Mean",
+            "RM_STD"
+        ]
+
+        customer_variance = (
+            customer_variance
+            .reset_index()
+        )
+
+        # =====================================================
+        # COEFFICIENT OF VARIATION
+        # =====================================================
+
+        customer_variance["CV"] = (
+
+            customer_variance["RM_STD"]
+
+            /
+
+            customer_variance["RM_Mean"]
+
+        )
+
+        customer_variance["CV"] = (
+            customer_variance["CV"]
+            .fillna(0)
+        )
+
+        # =====================================================
+        # VARIANCE SEGMENT
+        # =====================================================
+
+        customer_variance["VarianceSegment"] = np.where(
+
+            customer_variance["CV"] >= 0.50,
+
+            "🔥 Highly Volatile",
+
+            np.where(
+
+                customer_variance["CV"] >= 0.20,
+
+                "⚡ Moderate Variance",
+
+                "🟢 Stable"
+
+            )
+
+        )
+
+        # =====================================================
+        # MERGE TO CUSTOMER SUMMARY
+        # =====================================================
+
+        customer_summary = customer_summary.merge(
+
+            customer_variance[[
+                "ProfitCenter",
+                "CV",
+                "VarianceSegment"
+            ]],
+
+            on="ProfitCenter",
+
+            how="left"
 
         )
 
@@ -385,7 +473,7 @@ if uploaded_file:
         )
 
         # =====================================================
-        # MERGE TO CUSTOMER SUMMARY
+        # MERGE TREND
         # =====================================================
 
         customer_summary = customer_summary.merge(
@@ -585,6 +673,48 @@ if uploaded_file:
                 )
 
             # =================================================
+            # GET CUSTOMER VARIANCE
+            # =================================================
+
+            customer_cv = (
+
+                customer_summary[
+                    customer_summary["ProfitCenter"]
+                    == customer
+                ]["CV"]
+
+                .iloc[0]
+
+            )
+
+            variance_segment = (
+
+                customer_summary[
+                    customer_summary["ProfitCenter"]
+                    == customer
+                ]["VarianceSegment"]
+
+                .iloc[0]
+
+            )
+
+            # =================================================
+            # SEGMENT-BASED VARIANCE CONTROL
+            # =================================================
+
+            if variance_segment == "🔥 Highly Volatile":
+
+                variance_factor = 0.25
+
+            elif variance_segment == "⚡ Moderate Variance":
+
+                variance_factor = 0.12
+
+            else:
+
+                variance_factor = 0.05
+
+            # =================================================
             # OPERATIONAL RATIOS
             # =================================================
 
@@ -679,6 +809,31 @@ if uploaded_file:
 
                 raw_material = max(
                     forecast_rm.iloc[i],
+                    0
+                )
+
+                # =================================================
+                # VARIANCE ADJUSTMENT
+                # =================================================
+
+                variance_noise = np.random.normal(
+
+                    0,
+
+                    customer_cv * variance_factor
+
+                )
+
+                raw_material = (
+
+                    raw_material
+
+                    * (1 + variance_noise)
+
+                )
+
+                raw_material = max(
+                    raw_material,
                     0
                 )
 
