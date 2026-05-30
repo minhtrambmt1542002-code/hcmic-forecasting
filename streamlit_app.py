@@ -1,13 +1,12 @@
+
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 
 # =========================================================
 # OPTIONAL ADVANCED FORECAST
 # =========================================================
-
-# If statsmodels installed:
-# pip install statsmodels
 
 try:
 
@@ -123,21 +122,17 @@ if uploaded_file:
         # MONTH CONVERSION
         # =====================================================
 
-        # Expected format:
-        # Jan25
-        # Feb25
-
         try:
 
-           df["MonthDate"] = pd.to_datetime(
-    df["Month"],
-    format="%b'%y"
-)
+            df["MonthDate"] = pd.to_datetime(
+                df["Month"],
+                format="%b'%y"
+            )
 
         except:
 
             st.error(
-                "Month format invalid. Use format like Jan25, Feb25."
+                "Month format invalid. Use format like Mar'26"
             )
 
             st.stop()
@@ -206,6 +201,105 @@ if uploaded_file:
         # =====================================================
 
         customers = df["ProfitCenter"].unique()
+
+        # =====================================================
+        # CUSTOMER ANALYTICS
+        # =====================================================
+
+        total_customers = (
+            df["ProfitCenter"]
+            .nunique()
+        )
+
+        active_customers = (
+            df[
+                df["ProductionRevenue"] > 0
+            ]["ProfitCenter"]
+            .nunique()
+        )
+
+        inactive_customers = (
+            total_customers
+            - active_customers
+        )
+
+        # =====================================================
+        # CUSTOMER SEGMENTATION
+        # =====================================================
+
+        customer_summary = (
+
+            df.groupby("ProfitCenter")
+
+            .agg({
+
+                "ProductionRevenue": "mean",
+
+                "RawMaterialInventory": "mean",
+
+                "ReceivingTransaction": "mean"
+
+            })
+
+            .reset_index()
+
+        )
+
+        customer_summary["DemandSegment"] = np.where(
+
+            customer_summary["ProductionRevenue"]
+
+            >= customer_summary["ProductionRevenue"].quantile(0.75),
+
+            "High Demand",
+
+            np.where(
+
+                customer_summary["ProductionRevenue"]
+
+                >= customer_summary["ProductionRevenue"].quantile(0.40),
+
+                "Medium Demand",
+
+                "Low Demand"
+
+            )
+
+        )
+
+        # =====================================================
+        # DISPLAY KPI
+        # =====================================================
+
+        st.subheader("👥 Customer Analytics")
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Distinct Profit Centers",
+            total_customers
+        )
+
+        c2.metric(
+            "Active Customers",
+            active_customers
+        )
+
+        c3.metric(
+            "Inactive Customers",
+            inactive_customers
+        )
+
+        # =====================================================
+        # DISPLAY SEGMENTATION
+        # =====================================================
+
+        st.subheader("📊 Customer Demand Segmentation")
+
+        st.dataframe(
+            customer_summary,
+            use_container_width=True
+        )
 
         # =====================================================
         # GENERATE FUTURE MONTHS
@@ -451,10 +545,6 @@ if uploaded_file:
                     0
                 )
 
-                # =============================================
-                # OPERATIONAL FORECAST
-                # =============================================
-
                 receiving = (
                     raw_material
                     * avg_receiving_ratio
@@ -485,10 +575,6 @@ if uploaded_file:
                     * avg_bin_ratio
                 )
 
-                # =============================================
-                # DERIVED METRICS
-                # =============================================
-
                 total_transaction = (
                     receiving
                     + shipping
@@ -508,10 +594,6 @@ if uploaded_file:
                     warehouse_capacity * 2
                     + total_transaction * 0.5
                 )
-
-                # =============================================
-                # SAVE FORECAST
-                # =============================================
 
                 forecast_rows.append({
 
@@ -564,14 +646,6 @@ if uploaded_file:
         forecast_df = pd.DataFrame(
             forecast_rows
         )
-
-        if forecast_df.empty:
-
-            st.error(
-                "No forecast generated."
-            )
-
-            st.stop()
 
         # =====================================================
         # KPI DASHBOARD
