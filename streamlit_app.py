@@ -165,36 +165,31 @@ if uploaded_file:
         )
 
         # =====================================================
-        # FEATURE ENGINEERING
+        # RAW MATERIAL FEATURE ENGINEERING
         # =====================================================
-
-      ```python
-# =====================================================
-# RAW MATERIAL FEATURE ENGINEERING
-# =====================================================
-
-df["RM_Lag1"] = (
-    df.groupby("ProfitCenter")
-    ["RawMaterialInventory"]
-    .shift(1)
-)
-
-df["RM_Lag2"] = (
-    df.groupby("ProfitCenter")
-    ["RawMaterialInventory"]
-    .shift(2)
-)
-
-df["RM_MA3"] = (
-    df.groupby("ProfitCenter")
-    ["RawMaterialInventory"]
-    .transform(
-        lambda x:
-        x.rolling(3).mean()
-    )
-)
-
-df = df.fillna(0)
+        
+        df["RM_Lag1"] = (
+            df.groupby("ProfitCenter")
+            ["RawMaterialInventory"]
+            .shift(1)
+        )
+        
+        df["RM_Lag2"] = (
+            df.groupby("ProfitCenter")
+            ["RawMaterialInventory"]
+            .shift(2)
+        )
+        
+        df["RM_MA3"] = (
+            df.groupby("ProfitCenter")
+            ["RawMaterialInventory"]
+            .transform(
+                lambda x:
+                x.rolling(3).mean()
+            )
+        )
+        
+        df = df.fillna(0)
 
         # =====================================================
         # CUSTOMER LIST
