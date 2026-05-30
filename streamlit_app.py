@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -169,8 +168,6 @@ if uploaded_file:
         # FEATURE ENGINEERING
         # =====================================================
 
-        st.subheader("⚙️ Feature Engineering")
-
         df["Revenue_Lag1"] = (
             df.groupby("ProfitCenter")
             ["ProductionRevenue"]
@@ -193,32 +190,31 @@ if uploaded_file:
         )
 
         df = df.fillna(0)
-# =====================================================
-# FEATURE ENGINEERING DISPLAY
-# =====================================================
-
-st.subheader("⚙️ Feature Engineering")
-
-selected_customer = st.selectbox(
-    "Select ProfitCenter for Feature Engineering",
-    customers
-)
-
-feature_df = df[
-    df["ProfitCenter"]
-    == selected_customer
-]
-
-st.dataframe(
-    feature_df,
-    use_container_width=True
-)
 
         # =====================================================
         # CUSTOMER LIST
         # =====================================================
 
         customers = df["ProfitCenter"].unique()
+
+        # =====================================================
+        # FEATURE ENGINEERING DISPLAY
+        # =====================================================
+
+        st.subheader("⚙️ Feature Engineering")
+
+        for customer in customers:
+
+            st.markdown(f"## ProfitCenter: {customer}")
+
+            feature_df = df[
+                df["ProfitCenter"] == customer
+            ]
+
+            st.dataframe(
+                feature_df,
+                use_container_width=True
+            )
 
         # =====================================================
         # CUSTOMER ANALYTICS
@@ -332,7 +328,7 @@ st.dataframe(
         )
 
         future_months = [
-            d.strftime("%b%y")
+            d.strftime("%b'%y")
             for d in future_dates
         ]
 
@@ -664,6 +660,14 @@ st.dataframe(
         forecast_df = pd.DataFrame(
             forecast_rows
         )
+
+        if forecast_df.empty:
+
+            st.error(
+                "No forecast generated."
+            )
+
+            st.stop()
 
         # =====================================================
         # KPI DASHBOARD
