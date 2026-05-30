@@ -172,20 +172,28 @@ if uploaded_file:
 
     forecast_rows = []
 
-    future_months = [
-        "Sep26",
-        "Oct26",
-        "Nov26",
-        "Dec26",
-        "Jan27",
-        "Feb27",
-        "Mar27",
-        "Apr27",
-        "May27",
-        "Jun27",
-        "Jul27",
-        "Aug27"
-    ]
+   ```python id="4vx0z7"
+# =====================================================
+# GENERATE FUTURE MONTHS
+# =====================================================
+
+df["MonthDate"] = pd.to_datetime(
+    df["Month"],
+    format="%b'%y"
+)
+
+last_month = df["MonthDate"].max()
+
+future_dates = pd.date_range(
+    start=last_month + pd.DateOffset(months=1),
+    periods=6,
+    freq='MS'
+)
+
+future_months = [
+    d.strftime("%b%y")
+    for d in future_dates
+]
 
     # =====================================================
     # LOOP CUSTOMER
