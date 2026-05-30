@@ -168,28 +168,33 @@ if uploaded_file:
         # FEATURE ENGINEERING
         # =====================================================
 
-        df["Revenue_Lag1"] = (
-            df.groupby("ProfitCenter")
-            ["ProductionRevenue"]
-            .shift(1)
-        )
+      ```python
+# =====================================================
+# RAW MATERIAL FEATURE ENGINEERING
+# =====================================================
 
-        df["Revenue_Lag2"] = (
-            df.groupby("ProfitCenter")
-            ["ProductionRevenue"]
-            .shift(2)
-        )
+df["RM_Lag1"] = (
+    df.groupby("ProfitCenter")
+    ["RawMaterialInventory"]
+    .shift(1)
+)
 
-        df["Revenue_MA3"] = (
-            df.groupby("ProfitCenter")
-            ["ProductionRevenue"]
-            .transform(
-                lambda x:
-                x.rolling(3).mean()
-            )
-        )
+df["RM_Lag2"] = (
+    df.groupby("ProfitCenter")
+    ["RawMaterialInventory"]
+    .shift(2)
+)
 
-        df = df.fillna(0)
+df["RM_MA3"] = (
+    df.groupby("ProfitCenter")
+    ["RawMaterialInventory"]
+    .transform(
+        lambda x:
+        x.rolling(3).mean()
+    )
+)
+
+df = df.fillna(0)
 
         # =====================================================
         # CUSTOMER LIST
