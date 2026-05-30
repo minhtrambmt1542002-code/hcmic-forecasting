@@ -129,10 +129,10 @@ if uploaded_file:
 
         try:
 
-            df["MonthDate"] = pd.to_datetime(
-                df["Month"],
-                format="%b%y"
-            )
+           df["MonthDate"] = pd.to_datetime(
+    df["Month"],
+    format="%b'%y"
+)
 
         except:
 
