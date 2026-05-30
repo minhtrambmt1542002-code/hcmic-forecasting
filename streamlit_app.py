@@ -282,6 +282,119 @@ if uploaded_file:
         )
 
         # =====================================================
+        # CUSTOMER TREND ANALYSIS
+        # =====================================================
+
+        trend_list = []
+
+        for customer in customers:
+
+            temp = df[
+                df["ProfitCenter"] == customer
+            ].copy()
+
+            temp = temp.sort_values(
+                "MonthDate"
+            )
+
+            if len(temp) < 2:
+
+                growth_pct = 0
+
+                trend = "Insufficient Data"
+
+            else:
+
+                first_value = (
+                    temp["ProductionRevenue"]
+                    .iloc[0]
+                )
+
+                last_value = (
+                    temp["ProductionRevenue"]
+                    .iloc[-1]
+                )
+
+                # =============================================
+                # AVOID DIVISION BY ZERO
+                # =============================================
+
+                if first_value == 0:
+
+                    growth_pct = 0
+
+                else:
+
+                    growth_pct = (
+                        (
+                            last_value
+                            - first_value
+                        )
+                        / first_value
+                    ) * 100
+
+                # =============================================
+                # TREND CLASSIFICATION
+                # =============================================
+
+                if growth_pct >= 50:
+
+                    trend = "🚀 Strong Increasing"
+
+                elif growth_pct >= 15:
+
+                    trend = "📈 Increasing"
+
+                elif growth_pct >= 5:
+
+                    trend = "🟢 Slight Increasing"
+
+                elif growth_pct <= -50:
+
+                    trend = "🔻 Strong Decreasing"
+
+                elif growth_pct <= -15:
+
+                    trend = "📉 Decreasing"
+
+                elif growth_pct <= -5:
+
+                    trend = "🟠 Slight Decreasing"
+
+                else:
+
+                    trend = "➖ Stable"
+
+            trend_list.append({
+
+                "ProfitCenter": customer,
+
+                "GrowthPercent":
+                    round(growth_pct, 2),
+
+                "Trend": trend
+
+            })
+
+        # =====================================================
+        # TREND DATAFRAME
+        # =====================================================
+
+        trend_df = pd.DataFrame(
+            trend_list
+        )
+
+        # =====================================================
+        # MERGE TO CUSTOMER SUMMARY
+        # =====================================================
+
+        customer_summary = customer_summary.merge(
+            trend_df,
+            on="ProfitCenter",
+            how="left"
+        )
+
+        # =====================================================
         # DISPLAY KPI
         # =====================================================
 
@@ -376,6 +489,11 @@ if uploaded_file:
                         .mean()
                     )
 
+                    avg_growth = np.nan_to_num(
+                        avg_growth,
+                        nan=0
+                    )
+
                     last_value = (
                         temp["ProductionRevenue"]
                         .iloc[-1]
@@ -429,6 +547,11 @@ if uploaded_file:
                         temp["RawMaterialInventory"]
                         .pct_change()
                         .mean()
+                    )
+
+                    avg_growth = np.nan_to_num(
+                        avg_growth,
+                        nan=0
                     )
 
                     last_value = (
