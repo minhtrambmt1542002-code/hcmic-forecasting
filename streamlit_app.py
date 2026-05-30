@@ -2,7 +2,22 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
+# =========================================================
+# OPTIONAL ADVANCED FORECAST
+# =========================================================
+
+# If statsmodels installed:
+# pip install statsmodels
+
+try:
+
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+    STATS_AVAILABLE = True
+
+except:
+
+    STATS_AVAILABLE = False
 
 # =========================================================
 # PAGE CONFIG
@@ -108,14 +123,24 @@ if uploaded_file:
         # MONTH CONVERSION
         # =====================================================
 
-        # Expected format example:
+        # Expected format:
         # Jan25
         # Feb25
 
-        df["MonthDate"] = pd.to_datetime(
-            df["Month"],
-            format="%b%y"
-        )
+        try:
+
+            df["MonthDate"] = pd.to_datetime(
+                df["Month"],
+                format="%b%y"
+            )
+
+        except:
+
+            st.error(
+                "Month format invalid. Use format like Jan25, Feb25."
+            )
+
+            st.stop()
 
         # =====================================================
         # REMOVE INACTIVE CUSTOMERS
@@ -215,25 +240,57 @@ if uploaded_file:
                 df["ProfitCenter"] == customer
             ].copy()
 
-            # Need enough data for forecasting
-
-            if len(temp) < 12:
+            if len(temp) < 6:
                 continue
 
             # =================================================
-            # HOLT-WINTERS FORECAST
+            # FORECAST PRODUCTION REVENUE
             # =================================================
 
             try:
 
-                model_rev = ExponentialSmoothing(
-                    temp["ProductionRevenue"],
-                    trend='add',
-                    seasonal='add',
-                    seasonal_periods=12
-                ).fit()
+                if STATS_AVAILABLE and len(temp) >= 12:
 
-                forecast_rev = model_rev.forecast(6)
+                    model_rev = ExponentialSmoothing(
+                        temp["ProductionRevenue"],
+                        trend='add',
+                        seasonal='add',
+                        seasonal_periods=12
+                    ).fit()
+
+                    forecast_rev = model_rev.forecast(6)
+
+                else:
+
+                    avg_growth = (
+                        temp["ProductionRevenue"]
+                        .pct_change()
+                        .mean()
+                    )
+
+                    last_value = (
+                        temp["ProductionRevenue"]
+                        .iloc[-1]
+                    )
+
+                    forecast_rev = []
+
+                    for i in range(6):
+
+                        next_value = (
+                            last_value
+                            * (1 + avg_growth)
+                        )
+
+                        forecast_rev.append(
+                            max(next_value, 0)
+                        )
+
+                        last_value = next_value
+
+                    forecast_rev = pd.Series(
+                        forecast_rev
+                    )
 
             except:
 
@@ -241,16 +298,54 @@ if uploaded_file:
                     [temp["ProductionRevenue"].mean()] * 6
                 )
 
+            # =================================================
+            # FORECAST RAW MATERIAL
+            # =================================================
+
             try:
 
-                model_rm = ExponentialSmoothing(
-                    temp["RawMaterialInventory"],
-                    trend='add',
-                    seasonal='add',
-                    seasonal_periods=12
-                ).fit()
+                if STATS_AVAILABLE and len(temp) >= 12:
 
-                forecast_rm = model_rm.forecast(6)
+                    model_rm = ExponentialSmoothing(
+                        temp["RawMaterialInventory"],
+                        trend='add',
+                        seasonal='add',
+                        seasonal_periods=12
+                    ).fit()
+
+                    forecast_rm = model_rm.forecast(6)
+
+                else:
+
+                    avg_growth = (
+                        temp["RawMaterialInventory"]
+                        .pct_change()
+                        .mean()
+                    )
+
+                    last_value = (
+                        temp["RawMaterialInventory"]
+                        .iloc[-1]
+                    )
+
+                    forecast_rm = []
+
+                    for i in range(6):
+
+                        next_value = (
+                            last_value
+                            * (1 + avg_growth)
+                        )
+
+                        forecast_rm.append(
+                            max(next_value, 0)
+                        )
+
+                        last_value = next_value
+
+                    forecast_rm = pd.Series(
+                        forecast_rm
+                    )
 
             except:
 
@@ -346,10 +441,6 @@ if uploaded_file:
 
             for i, month in enumerate(future_months):
 
-                # =============================================
-                # PREVENT NEGATIVE FORECAST
-                # =============================================
-
                 production_revenue = max(
                     forecast_rev.iloc[i],
                     0
@@ -365,51 +456,33 @@ if uploaded_file:
                 # =============================================
 
                 receiving = (
-
                     raw_material
-
                     * avg_receiving_ratio
-
                 )
 
                 shipping = (
-
                     production_revenue
-
                     * avg_shipping_ratio
-
                 )
 
                 transfer = (
-
                     receiving
-
                     * avg_transfer_ratio
-
                 )
 
                 fg_pallet = (
-
                     production_revenue
-
                     * avg_fg_ratio
-
                 )
 
                 rm_pallet = (
-
                     raw_material
-
                     * avg_rm_ratio
-
                 )
 
                 no_of_bin = (
-
                     raw_material
-
                     * avg_bin_ratio
-
                 )
 
                 # =============================================
@@ -417,21 +490,14 @@ if uploaded_file:
                 # =============================================
 
                 total_transaction = (
-
                     receiving
-
                     + shipping
-
                     + transfer
-
                 )
 
                 no_of_pallet = (
-
                     fg_pallet
-
                     + rm_pallet
-
                 )
 
                 warehouse_capacity = (
@@ -439,11 +505,8 @@ if uploaded_file:
                 )
 
                 warehouse_cost = (
-
                     warehouse_capacity * 2
-
                     + total_transaction * 0.5
-
                 )
 
                 # =============================================
@@ -663,3 +726,13 @@ if uploaded_file:
             file_name="EMS_Forecast_Matrix.csv",
             mime="text/csv"
         )
+
+# =========================================================
+# FOOTER
+# =========================================================
+
+st.markdown("---")
+
+st.caption(
+    "HCMIC EMS Forecasting & Warehouse Optimization System"
+)
