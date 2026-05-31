@@ -137,14 +137,12 @@ if uploaded_file:
             st.stop()
 
         # =====================================================
-        # REMOVE INACTIVE CUSTOMERS
+        # REMOVE INACTIVE
         # =====================================================
 
         df["TotalActivity"] = (
 
-            df["ProductionRevenue"]
-
-            + df["RawMaterialInventory"]
+            df["RawMaterialInventory"]
 
             + df["ReceivingTransaction"]
 
@@ -165,7 +163,7 @@ if uploaded_file:
         )
 
         # =====================================================
-        # RAW MATERIAL FEATURE ENGINEERING
+        # FEATURE ENGINEERING
         # =====================================================
 
         df["RM_Lag1"] = (
@@ -203,18 +201,20 @@ if uploaded_file:
 
         st.subheader("⚙️ Feature Engineering")
 
-        for customer in customers:
+        selected_customer = st.selectbox(
+            "Select ProfitCenter",
+            customers
+        )
 
-            st.markdown(f"## ProfitCenter: {customer}")
+        feature_df = df[
+            df["ProfitCenter"]
+            == selected_customer
+        ]
 
-            feature_df = df[
-                df["ProfitCenter"] == customer
-            ]
-
-            st.dataframe(
-                feature_df,
-                use_container_width=True
-            )
+        st.dataframe(
+            feature_df,
+            use_container_width=True
+        )
 
         # =====================================================
         # CUSTOMER ANALYTICS
@@ -227,7 +227,7 @@ if uploaded_file:
 
         active_customers = (
             df[
-                df["ProductionRevenue"] > 0
+                df["RawMaterialInventory"] > 0
             ]["ProfitCenter"]
             .nunique()
         )
@@ -247,11 +247,11 @@ if uploaded_file:
 
             .agg({
 
-                "ProductionRevenue": "mean",
-
                 "RawMaterialInventory": "mean",
 
-                "ReceivingTransaction": "mean"
+                "ReceivingTransaction": "mean",
+
+                "NoOfBin": "mean"
 
             })
 
@@ -261,21 +261,21 @@ if uploaded_file:
 
         customer_summary["DemandSegment"] = np.where(
 
-            customer_summary["ProductionRevenue"]
+            customer_summary["RawMaterialInventory"]
 
-            >= customer_summary["ProductionRevenue"].quantile(0.75),
+            >= customer_summary["RawMaterialInventory"].quantile(0.75),
 
-            "High Demand",
+            "High Inventory",
 
             np.where(
 
-                customer_summary["ProductionRevenue"]
+                customer_summary["RawMaterialInventory"]
 
-                >= customer_summary["ProductionRevenue"].quantile(0.40),
+                >= customer_summary["RawMaterialInventory"].quantile(0.40),
 
-                "Medium Demand",
+                "Medium Inventory",
 
-                "Low Demand"
+                "Low Inventory"
 
             )
 
@@ -326,6 +326,11 @@ if uploaded_file:
 
         customer_variance["CV"] = (
             customer_variance["CV"]
+            .replace([np.inf, -np.inf], 0)
+        )
+
+        customer_variance["CV"] = (
+            customer_variance["CV"]
             .fillna(0)
         )
 
@@ -352,7 +357,7 @@ if uploaded_file:
         )
 
         # =====================================================
-        # MERGE TO CUSTOMER SUMMARY
+        # MERGE VARIANCE
         # =====================================================
 
         customer_summary = customer_summary.merge(
@@ -370,7 +375,7 @@ if uploaded_file:
         )
 
         # =====================================================
-        # CUSTOMER TREND ANALYSIS
+        # TREND ANALYSIS
         # =====================================================
 
         trend_list = []
@@ -394,18 +399,14 @@ if uploaded_file:
             else:
 
                 first_value = (
-                    temp["ProductionRevenue"]
+                    temp["RawMaterialInventory"]
                     .iloc[0]
                 )
 
                 last_value = (
-                    temp["ProductionRevenue"]
+                    temp["RawMaterialInventory"]
                     .iloc[-1]
                 )
-
-                # =============================================
-                # AVOID DIVISION BY ZERO
-                # =============================================
 
                 if first_value == 0:
 
@@ -420,10 +421,6 @@ if uploaded_file:
                         )
                         / first_value
                     ) * 100
-
-                # =============================================
-                # TREND CLASSIFICATION
-                # =============================================
 
                 if growth_pct >= 50:
 
@@ -464,17 +461,9 @@ if uploaded_file:
 
             })
 
-        # =====================================================
-        # TREND DATAFRAME
-        # =====================================================
-
         trend_df = pd.DataFrame(
             trend_list
         )
-
-        # =====================================================
-        # MERGE TREND
-        # =====================================================
 
         customer_summary = customer_summary.merge(
             trend_df,
@@ -553,66 +542,6 @@ if uploaded_file:
                 continue
 
             # =================================================
-            # FORECAST PRODUCTION REVENUE
-            # =================================================
-
-            try:
-
-                if STATS_AVAILABLE and len(temp) >= 12:
-
-                    model_rev = ExponentialSmoothing(
-                        temp["ProductionRevenue"],
-                        trend='add',
-                        seasonal='add',
-                        seasonal_periods=12
-                    ).fit()
-
-                    forecast_rev = model_rev.forecast(6)
-
-                else:
-
-                    avg_growth = (
-                        temp["ProductionRevenue"]
-                        .pct_change()
-                        .mean()
-                    )
-
-                    avg_growth = np.nan_to_num(
-                        avg_growth,
-                        nan=0
-                    )
-
-                    last_value = (
-                        temp["ProductionRevenue"]
-                        .iloc[-1]
-                    )
-
-                    forecast_rev = []
-
-                    for i in range(6):
-
-                        next_value = (
-                            last_value
-                            * (1 + avg_growth)
-                        )
-
-                        forecast_rev.append(
-                            max(next_value, 0)
-                        )
-
-                        last_value = next_value
-
-                    forecast_rev = pd.Series(
-                        forecast_rev
-                    )
-
-            except:
-
-                forecast_rev = pd.Series(
-                    [temp["ProductionRevenue"].mean()] * 6
-                )
-
-            # =================================================
             # FORECAST RAW MATERIAL
             # =================================================
 
@@ -673,7 +602,29 @@ if uploaded_file:
                 )
 
             # =================================================
-            # GET CUSTOMER VARIANCE
+            # DERIVE REVENUE FROM RM
+            # =================================================
+
+            avg_revenue_ratio = (
+
+                temp["ProductionRevenue"].sum()
+
+                /
+
+                max(
+                    temp["RawMaterialInventory"].sum(),
+                    1
+                )
+
+            )
+
+            forecast_rev = (
+                forecast_rm
+                * avg_revenue_ratio
+            )
+
+            # =================================================
+            # CUSTOMER VARIANCE
             # =================================================
 
             customer_cv = (
@@ -699,7 +650,7 @@ if uploaded_file:
             )
 
             # =================================================
-            # SEGMENT-BASED VARIANCE CONTROL
+            # VARIANCE CONTROL
             # =================================================
 
             if variance_segment == "🔥 Highly Volatile":
@@ -813,14 +764,15 @@ if uploaded_file:
                 )
 
                 # =================================================
-                # VARIANCE ADJUSTMENT
+                # DETERMINISTIC VARIANCE CONTROL
                 # =================================================
 
-                variance_noise = np.random.normal(
+                variance_multiplier = (
 
-                    0,
+                    1
 
-                    customer_cv * variance_factor
+                    + customer_cv
+                    * variance_factor
 
                 )
 
@@ -828,7 +780,7 @@ if uploaded_file:
 
                     raw_material
 
-                    * (1 + variance_noise)
+                    * variance_multiplier
 
                 )
 
@@ -836,6 +788,10 @@ if uploaded_file:
                     raw_material,
                     0
                 )
+
+                # =================================================
+                # OPERATIONAL FORECAST
+                # =================================================
 
                 receiving = (
                     raw_material
@@ -1057,14 +1013,14 @@ if uploaded_file:
         # CHART
         # =====================================================
 
-        st.subheader("📈 Revenue Forecast")
+        st.subheader("📈 Raw Material Inventory Forecast")
 
         fig = px.line(
             forecast_df,
             x="Month",
-            y="ProductionRevenue",
+            y="RawMaterialInventory",
             color="ProfitCenter",
-            title="Production Revenue Forecast",
+            title="Raw Material Inventory Forecast",
             markers=True
         )
 
