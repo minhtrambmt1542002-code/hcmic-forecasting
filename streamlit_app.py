@@ -183,11 +183,12 @@ if uploaded_file:
             ["RawMaterialInventory"]
             .transform(
                 lambda x:
-                x.rolling(3).mean()
+                x.rolling(
+                    3,
+                    min_periods=1
+                ).mean()
             )
         )
-
-        df = df.fillna(0)
 
         # =====================================================
         # CUSTOMER LIST
@@ -201,20 +202,18 @@ if uploaded_file:
 
         st.subheader("⚙️ Feature Engineering")
 
-        selected_customer = st.selectbox(
-            "Select ProfitCenter",
-            customers
-        )
+        for customer in customers:
 
-        feature_df = df[
-            df["ProfitCenter"]
-            == selected_customer
-        ]
+            st.markdown(f"## ProfitCenter: {customer}")
 
-        st.dataframe(
-            feature_df,
-            use_container_width=True
-        )
+            feature_df = df[
+                df["ProfitCenter"] == customer
+            ]
+
+            st.dataframe(
+                feature_df,
+                use_container_width=True
+            )
 
         # =====================================================
         # CUSTOMER ANALYTICS
@@ -602,6 +601,14 @@ if uploaded_file:
                 )
 
             # =================================================
+            # CLIP NEGATIVE
+            # =================================================
+
+            forecast_rm = forecast_rm.clip(
+                lower=0
+            )
+
+            # =================================================
             # DERIVE REVENUE FROM RM
             # =================================================
 
@@ -621,6 +628,10 @@ if uploaded_file:
             forecast_rev = (
                 forecast_rm
                 * avg_revenue_ratio
+            )
+
+            forecast_rev = forecast_rev.clip(
+                lower=0
             )
 
             # =================================================
@@ -764,15 +775,14 @@ if uploaded_file:
                 )
 
                 # =================================================
-                # DETERMINISTIC VARIANCE CONTROL
+                # RANDOM VARIANCE
                 # =================================================
 
-                variance_multiplier = (
+                variance_noise = np.random.normal(
 
-                    1
+                    0,
 
-                    + customer_cv
-                    * variance_factor
+                    customer_cv * variance_factor
 
                 )
 
@@ -780,7 +790,7 @@ if uploaded_file:
 
                     raw_material
 
-                    * variance_multiplier
+                    * (1 + variance_noise)
 
                 )
 
@@ -902,6 +912,19 @@ if uploaded_file:
             )
 
             st.stop()
+
+        # =====================================================
+        # SORT FORECAST MONTH
+        # =====================================================
+
+        forecast_df["MonthDate"] = pd.to_datetime(
+            forecast_df["Month"],
+            format="%b'%y"
+        )
+
+        forecast_df = forecast_df.sort_values(
+            "MonthDate"
+        )
 
         # =====================================================
         # KPI DASHBOARD
