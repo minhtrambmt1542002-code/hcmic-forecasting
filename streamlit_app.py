@@ -834,12 +834,12 @@ if uploaded_file:
                     no_of_pallet
                 )
 
-                warehouse_capacity = (
-
+               warehouse_capacity = (
+                
                     base_capacity
-
-                    * (1 + alpha)
-
+                
+                    * (1 + alpha - beta)
+                
                 )
 
                 # =================================================
@@ -852,7 +852,7 @@ if uploaded_file:
 
                 shortage_cost = (
                     max(
-                        receiving - raw_material,
+                        forecast_demand - inventory,
                         0
                     ) * 0.30
                 )
