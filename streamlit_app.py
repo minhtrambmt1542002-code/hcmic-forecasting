@@ -17,6 +17,22 @@ except:
 
     STATS_AVAILABLE = False
 
+# =====================================================
+# IMPORT VALIDATION METRICS
+# =====================================================
+
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error
+)
+
+# =====================================================
+# WAREHOUSE FLEXIBILITY PARAMETERS
+# =====================================================
+
+alpha = 0.20
+beta = 0.10
+
 # =========================================================
 # PAGE CONFIG
 # =========================================================
@@ -471,40 +487,6 @@ if uploaded_file:
         )
 
         # =====================================================
-        # DISPLAY KPI
-        # =====================================================
-
-        st.subheader("👥 Customer Analytics")
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "Distinct Profit Centers",
-            total_customers
-        )
-
-        c2.metric(
-            "Active Customers",
-            active_customers
-        )
-
-        c3.metric(
-            "Inactive Customers",
-            inactive_customers
-        )
-
-        # =====================================================
-        # DISPLAY SEGMENTATION
-        # =====================================================
-
-        st.subheader("📊 Customer Demand Segmentation")
-
-        st.dataframe(
-            customer_summary,
-            use_container_width=True
-        )
-
-        # =====================================================
         # GENERATE FUTURE MONTHS
         # =====================================================
 
@@ -844,13 +826,55 @@ if uploaded_file:
                     + rm_pallet
                 )
 
+                # =================================================
+                # FLEXIBLE WAREHOUSE CAPACITY
+                # =================================================
+
+                base_capacity = (
+                    no_of_pallet
+                )
+
                 warehouse_capacity = (
-                    no_of_pallet * 1.2
+
+                    base_capacity
+
+                    * (1 + alpha)
+
+                )
+
+                # =================================================
+                # COST COMPONENTS
+                # =================================================
+
+                holding_cost = (
+                    raw_material * 0.15
+                )
+
+                shortage_cost = (
+                    max(
+                        receiving - raw_material,
+                        0
+                    ) * 0.30
+                )
+
+                capacity_cost = (
+                    warehouse_capacity * 2
+                )
+
+                transaction_cost = (
+                    total_transaction * 0.50
                 )
 
                 warehouse_cost = (
-                    warehouse_capacity * 2
-                    + total_transaction * 0.5
+
+                    holding_cost
+
+                    + shortage_cost
+
+                    + capacity_cost
+
+                    + transaction_cost
+
                 )
 
                 forecast_rows.append({
@@ -927,6 +951,100 @@ if uploaded_file:
         )
 
         # =====================================================
+        # FORECAST VALIDATION
+        # =====================================================
+
+        validation_rows = []
+
+        for customer in customers:
+
+            temp = df[
+                df["ProfitCenter"] == customer
+            ].copy()
+
+            temp = temp.sort_values(
+                "MonthDate"
+            )
+
+            if len(temp) < 6:
+                continue
+
+            actual = (
+                temp["RawMaterialInventory"]
+                .iloc[-6:]
+                .values
+            )
+
+            predicted = (
+                temp["RM_MA3"]
+                .iloc[-6:]
+                .values
+            )
+
+            mae = mean_absolute_error(
+                actual,
+                predicted
+            )
+
+            rmse = np.sqrt(
+                mean_squared_error(
+                    actual,
+                    predicted
+                )
+            )
+
+            mape = np.mean(
+
+                np.abs(
+                    (
+                        actual - predicted
+                    )
+
+                    /
+
+                    np.where(
+                        actual == 0,
+                        1,
+                        actual
+                    )
+
+                )
+
+            ) * 100
+
+            validation_rows.append({
+
+                "ProfitCenter": customer,
+
+                "MAE":
+                    round(mae, 2),
+
+                "RMSE":
+                    round(rmse, 2),
+
+                "MAPE":
+                    round(mape, 2)
+
+            })
+
+        validation_df = pd.DataFrame(
+            validation_rows
+        )
+
+        # =====================================================
+        # DISPLAY VALIDATION
+        # =====================================================
+
+        st.subheader(
+            "📏 Forecast Accuracy Validation"
+        )
+
+        st.dataframe(
+            validation_df,
+            use_container_width=True
+        )
+
+        # =====================================================
         # KPI DASHBOARD
         # =====================================================
 
@@ -947,6 +1065,17 @@ if uploaded_file:
         col3.metric(
             "Average Transaction",
             f"{forecast_df['TotalTransaction'].mean():,.0f}"
+        )
+
+        # =====================================================
+        # DISPLAY SEGMENTATION
+        # =====================================================
+
+        st.subheader("📊 Customer Demand Segmentation")
+
+        st.dataframe(
+            customer_summary,
+            use_container_width=True
         )
 
         # =====================================================
