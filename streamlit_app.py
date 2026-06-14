@@ -830,16 +830,13 @@ if uploaded_file:
                 # FLEXIBLE WAREHOUSE CAPACITY
                 # =================================================
 
-                               base_capacity = (
+                base_capacity = (
                     no_of_pallet
                 )
 
                 warehouse_capacity = (
-
                     base_capacity
-
                     * (1 + alpha - beta)
-
                 )
 
                 # =================================================
