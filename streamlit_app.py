@@ -206,6 +206,50 @@ if uploaded_file:
             )
         )
 
+        df["RM_STD3"] = (
+
+            df.groupby("ProfitCenter")
+
+            ["RawMaterialInventory"]
+
+            .transform(
+
+                lambda x:
+
+                x.rolling(
+                    3,
+                    min_periods=1
+                ).std()
+
+            )
+
+        )
+
+        df["RM_STD3"] = (
+            df["RM_STD3"]
+            .fillna(0)
+        )
+
+        df["RM_CV3"] = (
+
+            df["RM_STD3"]
+
+            /
+
+            df["RM_MA3"]
+
+        )
+
+        df["RM_CV3"] = (
+            df["RM_CV3"]
+            .replace([np.inf, -np.inf], 0)
+        )
+
+        df["RM_CV3"] = (
+            df["RM_CV3"]
+            .fillna(0)
+        )
+
         # =====================================================
         # CUSTOMER LIST
         # =====================================================
@@ -271,28 +315,6 @@ if uploaded_file:
             })
 
             .reset_index()
-
-        )
-
-        customer_summary["DemandSegment"] = np.where(
-
-            customer_summary["RawMaterialInventory"]
-
-            >= customer_summary["RawMaterialInventory"].quantile(0.75),
-
-            "High Inventory",
-
-            np.where(
-
-                customer_summary["RawMaterialInventory"]
-
-                >= customer_summary["RawMaterialInventory"].quantile(0.40),
-
-                "Medium Inventory",
-
-                "Low Inventory"
-
-            )
 
         )
 
@@ -376,16 +398,28 @@ if uploaded_file:
         # =====================================================
 
         customer_summary = customer_summary.merge(
-
-            customer_variance[[
-                "ProfitCenter",
-                "CV",
-                "VarianceSegment"
-            ]],
-
+            customer_variance[
+                ["ProfitCenter", "CV", "VarianceSegment"]
+            ],
             on="ProfitCenter",
-
             how="left"
+        )
+
+        customer_summary["DemandSegment"] = np.where(
+
+            customer_summary["CV"] >= 0.50,
+
+            "Volatile",
+
+            np.where(
+
+                customer_summary["CV"] >= 0.20,
+
+                "Moderate",
+
+                "Stable"
+
+            )
 
         )
 
@@ -466,14 +500,10 @@ if uploaded_file:
                     trend = "➖ Stable"
 
             trend_list.append({
-
                 "ProfitCenter": customer,
-
                 "GrowthPercent":
                     round(growth_pct, 2),
-
                 "Trend": trend
-
             })
 
         trend_df = pd.DataFrame(
@@ -487,31 +517,24 @@ if uploaded_file:
         )
 
         # =====================================================
-        # GENERATE FUTURE MONTHS
+        # FUTURE MONTHS
         # =====================================================
 
-        last_month = df["MonthDate"].max()
-
-        future_dates = pd.date_range(
-            start=last_month + pd.DateOffset(months=1),
-            periods=6,
-            freq='MS'
-        )
+        last_date = df["MonthDate"].max()
 
         future_months = [
-            d.strftime("%b'%y")
-            for d in future_dates
+            (
+                last_date
+                + pd.DateOffset(months=i + 1)
+            ).strftime("%b'%y")
+            for i in range(6)
         ]
 
         # =====================================================
-        # FORECAST ENGINE
+        # FORECAST LOOP
         # =====================================================
 
         forecast_rows = []
-
-        # =====================================================
-        # LOOP CUSTOMER
-        # =====================================================
 
         for customer in customers:
 
@@ -519,7 +542,7 @@ if uploaded_file:
                 df["ProfitCenter"] == customer
             ].copy()
 
-            if len(temp) < 6:
+            if len(temp) < 3:
                 continue
 
             # =================================================
@@ -528,12 +551,12 @@ if uploaded_file:
 
             try:
 
-                if STATS_AVAILABLE and len(temp) >= 12:
+                if STATS_AVAILABLE and len(temp) >= 24:
 
                     model_rm = ExponentialSmoothing(
                         temp["RawMaterialInventory"],
-                        trend='add',
-                        seasonal='add',
+                        trend="add",
+                        seasonal="add",
                         seasonal_periods=12
                     ).fit()
 
@@ -559,7 +582,7 @@ if uploaded_file:
 
                     forecast_rm = []
 
-                    for i in range(6):
+                    for _ in range(6):
 
                         next_value = (
                             last_value
@@ -663,81 +686,57 @@ if uploaded_file:
             # =================================================
 
             avg_receiving_ratio = (
-
                 temp["ReceivingTransaction"].sum()
-
                 /
-
                 max(
                     temp["RawMaterialInventory"].sum(),
                     1
                 )
-
             )
 
             avg_shipping_ratio = (
-
                 temp["ShippingTransaction"].sum()
-
                 /
-
                 max(
                     temp["ProductionRevenue"].sum(),
                     1
                 )
-
             )
 
             avg_transfer_ratio = (
-
                 temp["LocationTransferTransaction"].sum()
-
                 /
-
                 max(
                     temp["ReceivingTransaction"].sum(),
                     1
                 )
-
             )
 
             avg_fg_ratio = (
-
                 temp["FG_Pallet"].sum()
-
                 /
-
                 max(
                     temp["ProductionRevenue"].sum(),
                     1
                 )
-
             )
 
             avg_rm_ratio = (
-
                 temp["RM_Pallet"].sum()
-
                 /
-
                 max(
                     temp["RawMaterialInventory"].sum(),
                     1
                 )
-
             )
 
             avg_bin_ratio = (
-
                 temp["NoOfBin"].sum()
-
                 /
-
                 max(
                     temp["RawMaterialInventory"].sum(),
                     1
                 )
-
             )
 
             # =================================================
@@ -756,34 +755,20 @@ if uploaded_file:
                     0
                 )
 
-                # =================================================
-                # RANDOM VARIANCE
-                # =================================================
-
                 variance_noise = np.random.normal(
-
                     0,
-
                     customer_cv * variance_factor
-
                 )
 
                 raw_material = (
-
                     raw_material
-
                     * (1 + variance_noise)
-
                 )
 
                 raw_material = max(
                     raw_material,
                     0
                 )
-
-                # =================================================
-                # OPERATIONAL FORECAST
-                # =================================================
 
                 receiving = (
                     raw_material
@@ -826,22 +811,40 @@ if uploaded_file:
                     + rm_pallet
                 )
 
-                # =================================================
-                # FLEXIBLE WAREHOUSE CAPACITY
-                # =================================================
+                # Inventory Evolution
 
-                base_capacity = (
-                    no_of_pallet
+                if i == 0:
+
+                    inventory = (
+                        temp["RawMaterialInventory"]
+                        .iloc[-1]
+                    )
+
+                else:
+
+                    inventory = inventory_next
+
+                inventory_next = (
+                    inventory
+                    + receiving
+                    - shipping
                 )
+
+                inventory_next = max(
+                    inventory_next,
+                    0
+                )
+
+                # Capacity
+
+                base_capacity = no_of_pallet
 
                 warehouse_capacity = (
                     base_capacity
                     * (1 + alpha - beta)
                 )
 
-                # =================================================
-                # COST COMPONENTS
-                # =================================================
+                # Cost
 
                 holding_cost = (
                     raw_material * 0.15
@@ -849,7 +852,7 @@ if uploaded_file:
 
                 shortage_cost = (
                     max(
-                        forecast_demand - inventory,
+                        raw_material - inventory_next,
                         0
                     ) * 0.30
                 )
@@ -863,58 +866,28 @@ if uploaded_file:
                 )
 
                 warehouse_cost = (
-
                     holding_cost
-
                     + shortage_cost
-
                     + capacity_cost
-
                     + transaction_cost
-
                 )
 
                 forecast_rows.append({
 
                     "Month": month,
-
                     "ProfitCenter": customer,
-
-                    "ProductionRevenue":
-                        round(production_revenue, 0),
-
-                    "RawMaterialInventory":
-                        round(raw_material, 0),
-
-                    "ReceivingTransaction":
-                        round(receiving, 0),
-
-                    "LocationTransferTransaction":
-                        round(transfer, 0),
-
-                    "ShippingTransaction":
-                        round(shipping, 0),
-
-                    "TotalTransaction":
-                        round(total_transaction, 0),
-
-                    "FG_Pallet":
-                        round(fg_pallet, 0),
-
-                    "RM_Pallet":
-                        round(rm_pallet, 0),
-
-                    "NoOfPallet":
-                        round(no_of_pallet, 0),
-
-                    "NoOfBin":
-                        round(no_of_bin, 0),
-
-                    "WarehouseCapacity":
-                        round(warehouse_capacity, 0),
-
-                    "WarehouseCost":
-                        round(warehouse_cost, 0)
+                    "ProductionRevenue": round(production_revenue, 0),
+                    "RawMaterialInventory": round(raw_material, 0),
+                    "ReceivingTransaction": round(receiving, 0),
+                    "LocationTransferTransaction": round(transfer, 0),
+                    "ShippingTransaction": round(shipping, 0),
+                    "TotalTransaction": round(total_transaction, 0),
+                    "FG_Pallet": round(fg_pallet, 0),
+                    "RM_Pallet": round(rm_pallet, 0),
+                    "NoOfPallet": round(no_of_pallet, 0),
+                    "NoOfBin": round(no_of_bin, 0),
+                    "WarehouseCapacity": round(warehouse_capacity, 0),
+                    "WarehouseCost": round(warehouse_cost, 0)
 
                 })
 
@@ -933,10 +906,6 @@ if uploaded_file:
             )
 
             st.stop()
-
-        # =====================================================
-        # SORT FORECAST MONTH
-        # =====================================================
 
         forecast_df["MonthDate"] = pd.to_datetime(
             forecast_df["Month"],
@@ -972,11 +941,55 @@ if uploaded_file:
                 .values
             )
 
-            predicted = (
-                temp["RM_MA3"]
-                .iloc[-6:]
-                .values
-            )
+            try:
+
+                if STATS_AVAILABLE and len(temp) >= 24:
+
+                    model_val = ExponentialSmoothing(
+                        temp["RawMaterialInventory"],
+                        trend="add",
+                        seasonal="add",
+                        seasonal_periods=12
+                    ).fit()
+
+                    predicted = (
+                        model_val.fittedvalues
+                        .iloc[-6:]
+                        .values
+                    )
+
+                elif STATS_AVAILABLE:
+
+                    model_val = ExponentialSmoothing(
+                        temp["RawMaterialInventory"],
+                        trend="add",
+                        seasonal=None
+                    ).fit()
+
+                    predicted = (
+                        model_val.fittedvalues
+                        .iloc[-6:]
+                        .values
+                    )
+
+                else:
+
+                    predicted = (
+                        temp["RM_MA3"]
+                        .iloc[-6:]
+                        .values
+                    )
+
+            except:
+
+                predicted = (
+                    temp["RM_MA3"]
+                    .iloc[-6:]
+                    .values
+                )
+
+            actual = np.array(actual)
+            predicted = np.array(predicted)
 
             mae = mean_absolute_error(
                 actual,
@@ -993,8 +1006,10 @@ if uploaded_file:
             mape = np.mean(
 
                 np.abs(
+
                     (
-                        actual - predicted
+                        actual
+                        - predicted
                     )
 
                     /
@@ -1023,6 +1038,10 @@ if uploaded_file:
                     round(mape, 2)
 
             })
+
+        # =====================================================
+        # VALIDATION DATAFRAME
+        # =====================================================
 
         validation_df = pd.DataFrame(
             validation_rows
