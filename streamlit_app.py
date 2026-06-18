@@ -276,27 +276,6 @@ if uploaded_file:
             )
 
         # =====================================================
-        # CUSTOMER ANALYTICS
-        # =====================================================
-
-        total_customers = (
-            df["ProfitCenter"]
-            .nunique()
-        )
-
-        active_customers = (
-            df[
-                df["RawMaterialInventory"] > 0
-            ]["ProfitCenter"]
-            .nunique()
-        )
-
-        inactive_customers = (
-            total_customers
-            - active_customers
-        )
-
-        # =====================================================
         # CUSTOMER SEGMENTATION
         # =====================================================
 
@@ -546,6 +525,25 @@ if uploaded_file:
                 continue
 
             # =================================================
+            # KIỂM TRA DỮ LIỆU GỐC
+            # =================================================
+
+            st.markdown(
+                f"### 🔍 Raw Data Check: {customer}"
+            )
+
+            st.write(
+                temp[[
+                    "Month",
+                    "RawMaterialInventory",
+                    "ProductionRevenue",
+                    "ReceivingTransaction",
+                    "LocationTransferTransaction",
+                    "ShippingTransaction"
+                ]]
+            )
+
+            # =================================================
             # FORECAST RAW MATERIAL
             # =================================================
 
@@ -567,12 +565,15 @@ if uploaded_file:
                     avg_growth = (
                         temp["RawMaterialInventory"]
                         .pct_change()
+                        .replace([np.inf, -np.inf], np.nan)
+                        .fillna(0)
                         .mean()
                     )
 
-                    avg_growth = np.nan_to_num(
+                    avg_growth = np.clip(
                         avg_growth,
-                        nan=0
+                        -0.30,
+                        0.30
                     )
 
                     last_value = (
@@ -737,6 +738,34 @@ if uploaded_file:
                     temp["RawMaterialInventory"].sum(),
                     1
                 )
+            )
+
+            # =================================================
+            # GIỚI HẠN RATIO TỐI ĐA 5
+            # =================================================
+
+            avg_receiving_ratio = min(
+                avg_receiving_ratio, 5
+            )
+
+            avg_shipping_ratio = min(
+                avg_shipping_ratio, 5
+            )
+
+            avg_transfer_ratio = min(
+                avg_transfer_ratio, 5
+            )
+
+            avg_fg_ratio = min(
+                avg_fg_ratio, 5
+            )
+
+            avg_rm_ratio = min(
+                avg_rm_ratio, 5
+            )
+
+            avg_bin_ratio = min(
+                avg_bin_ratio, 5
             )
 
             # =================================================
@@ -958,7 +987,7 @@ if uploaded_file:
                         .values
                     )
 
-                elif STATS_AVAILABLE:
+                elif STATS_AVAILABLE and len(temp) >= 8:
 
                     model_val = ExponentialSmoothing(
                         temp["RawMaterialInventory"],
@@ -990,6 +1019,14 @@ if uploaded_file:
 
             actual = np.array(actual)
             predicted = np.array(predicted)
+
+            min_len = min(
+                len(actual),
+                len(predicted)
+            )
+
+            actual = actual[-min_len:]
+            predicted = predicted[-min_len:]
 
             mae = mean_absolute_error(
                 actual,
