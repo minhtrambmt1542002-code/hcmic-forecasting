@@ -344,8 +344,7 @@ if uploaded_file:
 
         # =====================================================
         # FORECAST VALIDATION — Train/Test Split
-        # FIX 1 (validation): dung len(train) de chon model
-        # FIX 2: has_seasonality dung CV > 0.10
+        # FIX: use len(train) to decide whether to run validation and skip if train < 12
         # =====================================================
         validation_rows = []
 
@@ -354,17 +353,27 @@ if uploaded_file:
             temp = temp.sort_values("MonthDate").reset_index(drop=True)
 
             if len(temp) < 9:
+                # still skip extremely small series for forecasting overall, keep this check for forecast loop consistency
                 continue
 
+            # prepare train/test
             train  = temp["RawMaterialInventory"].iloc[:-6]
             test   = temp["RawMaterialInventory"].iloc[-6:]
+            # debug: show counts as requested
+            st.write(customer, len(temp), len(train))
+
+            # require minimum train length for validation (12 months). If train < 12 => skip validation
+            if len(train) < 12:
+                st.info(f"Skipping validation for {customer}: insufficient training length (train={len(train)} < 12).")
+                continue
+
             actual = test.values
 
             # FIX 2: CV > 0.10 cho validation
             has_seasonality_val = check_seasonality(train)
 
             try:
-                # FIX 1: len(train) — vi model fit tren train
+                # use len(train) thresholds (model fits on train)
                 if STATS_AVAILABLE and len(train) >= 24 and has_seasonality_val:
                     model_val = ExponentialSmoothing(
                         train, trend="add", seasonal="add", seasonal_periods=12
