@@ -357,103 +357,94 @@ if uploaded_file:
                 forecast_df["ProfitCenter"] == customer, "ForecastModel"
             ].iloc[0]
 
-            try:
+                        try:
 
-    if selected_model == "Holt-Winters":
+                if selected_model == "Holt-Winters":
 
-        # Holt-Winters validation using fitted values
-        model_val = ExponentialSmoothing(
-            temp["RawMaterialInventory"],
-            trend="add",
-            seasonal="add",
-            seasonal_periods=12
-        ).fit()
+                    # Validate Holt-Winters using fitted values
+                    model_val = ExponentialSmoothing(
+                        temp["RawMaterialInventory"],
+                        trend="add",
+                        seasonal="add",
+                        seasonal_periods=12,
+                        initialization_method="estimated"
+                    ).fit()
 
-        actual = temp["RawMaterialInventory"].values
-        predicted = model_val.fittedvalues.values
+                    actual = temp["RawMaterialInventory"].values
+                    predicted = model_val.fittedvalues.values
 
-        val_model = "Holt-Winters"
-
-    elif selected_model == "Holt Trend":
-
-        model_val = ExponentialSmoothing(
-            train,
-            trend="add",
-            seasonal=None
-        ).fit()
-
-        actual = test.values
-        predicted = model_val.forecast(len(test)).values
-
-        val_model = "Holt Trend"
-
-    else:
-
-        avg_growth = (
-            train.pct_change()
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0)
-            .mean()
-        )
-
-        avg_growth = np.clip(avg_growth, -0.30, 0.30)
-
-        last_value = train.iloc[-1]
-
-        predicted = []
-
-        for _ in range(len(test)):
-            next_value = last_value * (1 + avg_growth)
-            predicted.append(max(next_value, 0))
-            last_value = next_value
-
-        actual = test.values
-        predicted = np.array(predicted)
-
-        val_model = "Average Growth"
+                    val_model = "Holt-Winters"
 
                 elif selected_model == "Holt Trend":
+
                     model_val = ExponentialSmoothing(
-                        train, trend="add", seasonal=None
+                        train,
+                        trend="add",
+                        seasonal=None,
+                        initialization_method="estimated"
                     ).fit()
-                    predicted = model_val.forecast(6).values
+
+                    actual = test.values
+                    predicted = model_val.forecast(len(test)).values
+
                     val_model = "Holt Trend"
 
                 else:
-                    # Average Growth hoac Fallback
+
                     avg_growth = (
                         train.pct_change()
-                        .replace([np.inf, -np.inf], np.nan).fillna(0).mean()
+                        .replace([np.inf, -np.inf], np.nan)
+                        .fillna(0)
+                        .mean()
                     )
+
                     avg_growth = np.clip(avg_growth, -0.30, 0.30)
+
                     last_value = train.iloc[-1]
-                    predicted  = []
-                    for _ in range(6):
+
+                    predicted = []
+
+                    for _ in range(len(test)):
                         next_value = last_value * (1 + avg_growth)
                         predicted.append(max(next_value, 0))
                         last_value = next_value
+
+                    actual = test.values
                     predicted = np.array(predicted)
+
                     val_model = "Average Growth"
 
             except Exception as e:
+
                 st.warning(f"Validation fallback [{customer}]: {e}")
+
                 avg_growth = (
                     train.pct_change()
-                    .replace([np.inf, -np.inf], np.nan).fillna(0).mean()
+                    .replace([np.inf, -np.inf], np.nan)
+                    .fillna(0)
+                    .mean()
                 )
+
                 avg_growth = np.clip(avg_growth, -0.30, 0.30)
+
                 last_value = train.iloc[-1]
-                predicted  = []
-                for _ in range(6):
+
+                predicted = []
+
+                for _ in range(len(test)):
                     next_value = last_value * (1 + avg_growth)
                     predicted.append(max(next_value, 0))
                     last_value = next_value
+
+                actual = test.values
                 predicted = np.array(predicted)
+
                 val_model = "Average Growth (Fallback)"
-if len(actual) != len(predicted):
-    min_len = min(len(actual), len(predicted))
-    actual = actual[-min_len:]
-    predicted = predicted[-min_len:]
+
+            if len(actual) != len(predicted):
+                min_len = min(len(actual), len(predicted))
+                actual = actual[-min_len:]
+                predicted = predicted[-min_len:]
 
             mae  = mean_absolute_error(actual, predicted)
             rmse = np.sqrt(mean_squared_error(actual, predicted))
