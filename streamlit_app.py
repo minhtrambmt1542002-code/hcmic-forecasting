@@ -357,7 +357,7 @@ if uploaded_file:
                 forecast_df["ProfitCenter"] == customer, "ForecastModel"
             ].iloc[0]
 
-                        try:
+            try:
 
                 if selected_model == "Holt-Winters":
 
