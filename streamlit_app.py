@@ -192,7 +192,7 @@ if uploaded_file:
             has_seasonality = check_seasonality(temp["RawMaterialInventory"])
 
             try:
-                if STATS_AVAILABLE and len(temp) >= 24 and has_seasonality:
+                if STATS_AVAILABLE and len(temp) >= 24:
                     model_rm = ExponentialSmoothing(
                         temp["RawMaterialInventory"], trend="add",
                         seasonal="add", seasonal_periods=12
