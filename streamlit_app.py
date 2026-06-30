@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,17 +17,11 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 alpha = 0.20
 beta  = 0.10
 
-st.set_page_config(
-    page_title="HCMIC Forecasting System",
-    layout="wide"
-)
+st.set_page_config(page_title="HCMIC Forecasting System", layout="wide")
 st.title("HCMIC EMS Forecasting & Warehouse Optimization")
 st.write("Enterprise EMS Forecasting Planning System")
 
-uploaded_file = st.file_uploader(
-    "Upload EMS Forecasting Dataset",
-    type=["xlsx"]
-)
+uploaded_file = st.file_uploader("Upload EMS Forecasting Dataset", type=["xlsx"])
 
 if uploaded_file:
     with st.spinner("Generating Forecast..."):
@@ -48,18 +43,15 @@ if uploaded_file:
             st.stop()
 
         numeric_cols = [
-            "ProductionRevenue", "RawMaterialInventory",
-            "ReceivingTransaction", "LocationTransferTransaction",
-            "ShippingTransaction", "FG_Pallet", "RM_Pallet", "NoOfBin"
+            "ProductionRevenue", "RawMaterialInventory", "ReceivingTransaction",
+            "LocationTransferTransaction", "ShippingTransaction",
+            "FG_Pallet", "RM_Pallet", "NoOfBin"
         ]
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.fillna(0)
 
-        # FIX 5 (prev): errors="coerce" chong loi locale Windows
-        df["MonthDate"] = pd.to_datetime(
-            df["Month"], format="%b'%y", errors="coerce"
-        )
+        df["MonthDate"] = pd.to_datetime(df["Month"], format="%b'%y", errors="coerce")
         if df["MonthDate"].isna().all():
             st.error("Month format invalid. Use format like Mar'26")
             st.stop()
@@ -138,8 +130,8 @@ if uploaded_file:
             if len(temp) < 2:
                 growth_pct, trend = 0, "Insufficient Data"
             else:
-                first_v = temp["RawMaterialInventory"].iloc[0]
-                last_v  = temp["RawMaterialInventory"].iloc[-1]
+                first_v    = temp["RawMaterialInventory"].iloc[0]
+                last_v     = temp["RawMaterialInventory"].iloc[-1]
                 growth_pct = ((last_v - first_v) / first_v * 100) if first_v != 0 else 0
                 if   growth_pct >= 50:  trend = "Strong Increasing"
                 elif growth_pct >= 15:  trend = "Increasing"
@@ -148,7 +140,11 @@ if uploaded_file:
                 elif growth_pct <= -15: trend = "Decreasing"
                 elif growth_pct <= -5:  trend = "Slight Decreasing"
                 else:                   trend = "Stable"
-            trend_list.append({"ProfitCenter": customer, "GrowthPercent": round(growth_pct, 2), "Trend": trend})
+            trend_list.append({
+                "ProfitCenter": customer,
+                "GrowthPercent": round(growth_pct, 2),
+                "Trend": trend
+            })
 
         trend_df = pd.DataFrame(trend_list)
         customer_summary = customer_summary.merge(trend_df, on="ProfitCenter", how="left")
@@ -163,8 +159,8 @@ if uploaded_file:
         ]
 
         # =====================================================
-        # HELPER: has_seasonality
-        # FIX 2: dung CV > 0.10 thay vi std > 0 (tranh false positive)
+        # HELPER: check_seasonality
+        # CV > 0.10 de tranh false positive
         # =====================================================
         def check_seasonality(series):
             if len(series) < 24:
@@ -184,7 +180,6 @@ if uploaded_file:
             if len(temp) < 3:
                 continue
 
-            # Raw Data Check
             st.markdown(f"### Raw Data Check: {customer}")
             st.write(temp[[
                 "Month", "RawMaterialInventory", "ProductionRevenue",
@@ -268,13 +263,13 @@ if uploaded_file:
             avg_transfer_ratio  = np.clip(
                 temp["LocationTransferTransaction"].sum() / max(temp["ReceivingTransaction"].sum(), 1), 0, 5)
             avg_fg_ratio        = np.clip(
-                temp["FG_Pallet"].sum() / max(temp["ProductionRevenue"].sum(), 1),       0, 5)
+                temp["FG_Pallet"].sum() / max(temp["ProductionRevenue"].sum(), 1),    0, 5)
             avg_rm_ratio        = np.clip(
-                temp["RM_Pallet"].sum() / max(temp["RawMaterialInventory"].sum(), 1),    0, 5)
+                temp["RM_Pallet"].sum() / max(temp["RawMaterialInventory"].sum(), 1), 0, 5)
             avg_bin_ratio       = np.clip(
-                temp["NoOfBin"].sum()   / max(temp["RawMaterialInventory"].sum(), 1),    0, 5)
+                temp["NoOfBin"].sum()   / max(temp["RawMaterialInventory"].sum(), 1), 0, 5)
 
-            # FIX 1: consumption_ratio = RM / Revenue (dung huong)
+            # consumption_ratio = RM / Revenue (dung huong)
             consumption_ratio = np.clip(
                 temp["RawMaterialInventory"].sum() / max(temp["ProductionRevenue"].sum(), 1), 0, 5)
 
@@ -297,17 +292,15 @@ if uploaded_file:
                 total_transaction = receiving + shipping + transfer
                 no_of_pallet      = fg_pallet + rm_pallet
 
-                # FIX 1: RM consumption tu production, khong phai shipping FG
                 rm_consumed    = production_revenue * consumption_ratio
                 inventory_next = max(inventory + receiving - rm_consumed, 0)
 
                 warehouse_capacity = no_of_pallet * (1 + alpha - beta)
-
-                holding_cost     = raw_material * 0.15
-                shortage_cost    = max(raw_material - inventory_next, 0) * 0.30
-                capacity_cost    = warehouse_capacity * 2
-                transaction_cost = total_transaction * 0.50
-                warehouse_cost   = holding_cost + shortage_cost + capacity_cost + transaction_cost
+                holding_cost       = raw_material * 0.15
+                shortage_cost      = max(raw_material - inventory_next, 0) * 0.30
+                capacity_cost      = warehouse_capacity * 2
+                transaction_cost   = total_transaction * 0.50
+                warehouse_cost     = holding_cost + shortage_cost + capacity_cost + transaction_cost
 
                 forecast_rows.append({
                     "Month":                       month,
@@ -344,7 +337,7 @@ if uploaded_file:
 
         # =====================================================
         # FORECAST VALIDATION — Train/Test Split
-        # FIX: use len(train) to decide whether to run validation and skip if train < 12
+        # Dung selected_model tu forecast_df -> 100% dong nhat
         # =====================================================
         validation_rows = []
 
@@ -353,35 +346,26 @@ if uploaded_file:
             temp = temp.sort_values("MonthDate").reset_index(drop=True)
 
             if len(temp) < 9:
-                # still skip extremely small series for forecasting overall, keep this check for forecast loop consistency
                 continue
 
-            # prepare train/test
             train  = temp["RawMaterialInventory"].iloc[:-6]
             test   = temp["RawMaterialInventory"].iloc[-6:]
-            # debug: show counts as requested
-            st.write(customer, len(temp), len(train))
-
-            # require minimum train length for validation (12 months). If train < 12 => skip validation
-            if len(train) < 12:
-                st.info(f"Skipping validation for {customer}: insufficient training length (train={len(train)} < 12).")
-                continue
-
             actual = test.values
 
-            # FIX 2: CV > 0.10 cho validation
-            has_seasonality_val = check_seasonality(train)
+            # Lay dung model ma Forecast da chon cho customer nay
+            selected_model = forecast_df.loc[
+                forecast_df["ProfitCenter"] == customer, "ForecastModel"
+            ].iloc[0]
 
             try:
-                # use len(train) thresholds (model fits on train)
-                if STATS_AVAILABLE and len(train) >= 24 and has_seasonality_val:
+                if selected_model == "Holt-Winters":
                     model_val = ExponentialSmoothing(
                         train, trend="add", seasonal="add", seasonal_periods=12
                     ).fit()
                     predicted = model_val.forecast(6).values
                     val_model = "Holt-Winters"
 
-                elif STATS_AVAILABLE and len(train) >= 12:
+                elif selected_model == "Holt Trend":
                     model_val = ExponentialSmoothing(
                         train, trend="add", seasonal=None
                     ).fit()
@@ -389,8 +373,10 @@ if uploaded_file:
                     val_model = "Holt Trend"
 
                 else:
+                    # Average Growth hoac Fallback
                     avg_growth = (
-                        train.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0).mean()
+                        train.pct_change()
+                        .replace([np.inf, -np.inf], np.nan).fillna(0).mean()
                     )
                     avg_growth = np.clip(avg_growth, -0.30, 0.30)
                     last_value = train.iloc[-1]
@@ -405,7 +391,8 @@ if uploaded_file:
             except Exception as e:
                 st.warning(f"Validation fallback [{customer}]: {e}")
                 avg_growth = (
-                    train.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0).mean()
+                    train.pct_change()
+                    .replace([np.inf, -np.inf], np.nan).fillna(0).mean()
                 )
                 avg_growth = np.clip(avg_growth, -0.30, 0.30)
                 last_value = train.iloc[-1]
@@ -455,7 +442,7 @@ if uploaded_file:
         # =====================================================
         st.subheader("KPI Dashboard")
         col1, col2, col3 = st.columns(3)
-        col1.metric("Total Warehouse Cost",      f"{forecast_df['WarehouseCost'].sum():,.0f}")
+        col1.metric("Total Warehouse Cost",       f"{forecast_df['WarehouseCost'].sum():,.0f}")
         col2.metric("Average Warehouse Capacity", f"{forecast_df['WarehouseCapacity'].mean():,.0f}")
         col3.metric("Average Transaction",        f"{forecast_df['TotalTransaction'].mean():,.0f}")
 
@@ -514,14 +501,13 @@ if uploaded_file:
         st.dataframe(forecast_df, use_container_width=True)
 
         # =====================================================
-        # DOWNLOAD — FIX 3: bao gom ForecastModel trong CSV
+        # DOWNLOAD
         # =====================================================
         st.subheader("Download")
         col_dl1, col_dl2 = st.columns(2)
 
         with col_dl1:
-            # FIX 3: merge ForecastModel vao matrix
-            model_map  = model_summary.set_index("ProfitCenter")["ForecastModel"]
+            model_map = model_summary.set_index("ProfitCenter")["ForecastModel"]
             matrix_with_model = matrix_df.copy()
             matrix_with_model.insert(
                 2, "ForecastModel",
@@ -536,7 +522,6 @@ if uploaded_file:
             )
 
         with col_dl2:
-            # Export toan bo forecast_df (co ForecastModel column)
             csv_full = forecast_df.drop(columns=["MonthDate"]).to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download Full Forecast Dataset CSV",
