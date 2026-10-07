@@ -1,572 +1,1296 @@
+# -*- coding: utf-8 -*-
+"""
+HCMIC EMS Data Mining & Warehouse Planning System
+=================================================
 
-import streamlit as st
-import pandas as pd
+Run with:   streamlit run hcmic_ems_warehouse_planning.py
+
+Required packages:
+    pip install streamlit pandas numpy plotly scikit-learn openpyxl
+    pip install xgboost lightgbm catboost      # candidate ML models
+
+Framework implemented
+---------------------
+STAGE 1 - Data Mining & Predictive Forecasting
+    Historical EMS Data -> Data Preprocessing -> Feature Engineering
+    -> Demand Pattern Analysis -> CV-Based Statistical Demand Segmentation
+    -> Machine Learning Predictive Modeling -> Model Validation & Selection
+    -> 6-Month Raw Material Inventory Forecast
+
+    [ Exogenous Forecast Input ]
+
+STAGE 2 - Dynamic Warehouse Planning
+    Inventory Dynamics -> Warehouse Operational Requirement Estimation
+    -> Pallet / Bin Requirement -> Warehouse Capacity Evaluation
+    -> Contract Flexibility -> Warehouse Cost Evaluation
+    -> Warehouse Planning Decision
+
+Stage 2 never retrains or feeds back into Stage 1: it only consumes the
+6-month RawMaterialInventory forecast as an exogenous input.
+"""
+
+import html
+import math
+import warnings
+
 import numpy as np
+import pandas as pd
 import plotly.express as px
-
-np.random.seed(42)
-
-try:
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    STATS_AVAILABLE = True
-except ImportError:
-    STATS_AVAILABLE = False
-
+import plotly.graph_objects as go
+import streamlit as st
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-alpha = 0.20
-beta  = 0.10
-
-st.set_page_config(page_title="HCMIC Forecasting System", layout="wide")
-st.title("HCMIC EMS Forecasting & Warehouse Optimization")
-st.write("Enterprise EMS Forecasting Planning System")
-
-uploaded_file = st.file_uploader("Upload EMS Forecasting Dataset", type=["xlsx"])
-
-if uploaded_file:
-    with st.spinner("Generating Forecast..."):
-
-        df = pd.read_excel(uploaded_file)
-
-        st.subheader("Raw Dataset")
-        st.dataframe(df)
-
-        required_cols = [
-            "Month", "ProfitCenter", "ProductionRevenue",
-            "RawMaterialInventory", "ReceivingTransaction",
-            "LocationTransferTransaction", "ShippingTransaction",
-            "FG_Pallet", "RM_Pallet", "NoOfBin"
-        ]
-        missing_cols = [c for c in required_cols if c not in df.columns]
-        if missing_cols:
-            st.error(f"Missing Columns: {missing_cols}")
-            st.stop()
-
-        numeric_cols = [
-            "ProductionRevenue", "RawMaterialInventory", "ReceivingTransaction",
-            "LocationTransferTransaction", "ShippingTransaction",
-            "FG_Pallet", "RM_Pallet", "NoOfBin"
-        ]
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.fillna(0)
-
-        df["MonthDate"] = pd.to_datetime(df["Month"], format="%b'%y", errors="coerce")
-        if df["MonthDate"].isna().all():
-            st.error("Month format invalid. Use format like Mar'26")
-            st.stop()
-        df = df.dropna(subset=["MonthDate"])
-
-        df["TotalActivity"] = (
-            df["RawMaterialInventory"]
-            + df["ReceivingTransaction"]
-            + df["ShippingTransaction"]
-        )
-        df = df[df["TotalActivity"] > 0]
-        df = df.sort_values(["ProfitCenter", "MonthDate"])
-
-        df["RM_Lag1"] = df.groupby("ProfitCenter")["RawMaterialInventory"].shift(1)
-        df["RM_Lag2"] = df.groupby("ProfitCenter")["RawMaterialInventory"].shift(2)
-        df["RM_MA3"]  = (
-            df.groupby("ProfitCenter")["RawMaterialInventory"]
-            .transform(lambda x: x.rolling(3, min_periods=1).mean())
-        )
-        df["RM_STD3"] = (
-            df.groupby("ProfitCenter")["RawMaterialInventory"]
-            .transform(lambda x: x.rolling(3, min_periods=1).std())
-        ).fillna(0)
-        df["RM_CV3"] = (
-            df["RM_STD3"] / df["RM_MA3"]
-        ).replace([np.inf, -np.inf], 0).fillna(0)
-
-        customers = df["ProfitCenter"].unique()
-
-        # =====================================================
-        # FEATURE ENGINEERING DISPLAY
-        # =====================================================
-        st.subheader("Feature Engineering")
-        for customer in customers:
-            st.markdown(f"## ProfitCenter: {customer}")
-            st.dataframe(df[df["ProfitCenter"] == customer], use_container_width=True)
-
-        # =====================================================
-        # CUSTOMER SEGMENTATION
-        # =====================================================
-        customer_summary = (
-            df.groupby("ProfitCenter")
-            .agg({"RawMaterialInventory": "mean", "ReceivingTransaction": "mean", "NoOfBin": "mean"})
-            .reset_index()
-        )
-
-        customer_variance = (
-            df.groupby("ProfitCenter")
-            .agg({"RawMaterialInventory": ["mean", "std"]})
-        )
-        customer_variance.columns = ["RM_Mean", "RM_STD"]
-        customer_variance = customer_variance.reset_index()
-        customer_variance["CV"] = (
-            customer_variance["RM_STD"] / customer_variance["RM_Mean"]
-        ).replace([np.inf, -np.inf], 0).fillna(0)
-        customer_variance["VarianceSegment"] = np.where(
-            customer_variance["CV"] >= 0.50, "Highly Volatile",
-            np.where(customer_variance["CV"] >= 0.20, "Moderate Variance", "Stable")
-        )
-
-        customer_summary = customer_summary.merge(
-            customer_variance[["ProfitCenter", "CV", "VarianceSegment"]],
-            on="ProfitCenter", how="left"
-        )
-        customer_summary["DemandSegment"] = np.where(
-            customer_summary["CV"] >= 0.50, "Volatile",
-            np.where(customer_summary["CV"] >= 0.20, "Moderate", "Stable")
-        )
-
-        # =====================================================
-        # TREND ANALYSIS
-        # =====================================================
-        trend_list = []
-        for customer in customers:
-            temp = df[df["ProfitCenter"] == customer].copy().sort_values("MonthDate")
-            if len(temp) < 2:
-                growth_pct, trend = 0, "Insufficient Data"
-            else:
-                first_v    = temp["RawMaterialInventory"].iloc[0]
-                last_v     = temp["RawMaterialInventory"].iloc[-1]
-                growth_pct = ((last_v - first_v) / first_v * 100) if first_v != 0 else 0
-                if   growth_pct >= 50:  trend = "Strong Increasing"
-                elif growth_pct >= 15:  trend = "Increasing"
-                elif growth_pct >= 5:   trend = "Slight Increasing"
-                elif growth_pct <= -50: trend = "Strong Decreasing"
-                elif growth_pct <= -15: trend = "Decreasing"
-                elif growth_pct <= -5:  trend = "Slight Decreasing"
-                else:                   trend = "Stable"
-            trend_list.append({
-                "ProfitCenter": customer,
-                "GrowthPercent": round(growth_pct, 2),
-                "Trend": trend
-            })
-
-        trend_df = pd.DataFrame(trend_list)
-        customer_summary = customer_summary.merge(trend_df, on="ProfitCenter", how="left")
-
-        # =====================================================
-        # FUTURE MONTHS
-        # =====================================================
-        last_date = df["MonthDate"].max()
-        future_months = [
-            (last_date + pd.DateOffset(months=i + 1)).strftime("%b'%y")
-            for i in range(6)
-        ]
-
-        # =====================================================
-        # HELPER: check_seasonality
-        # CV > 0.10 de tranh false positive
-        # =====================================================
-        def check_seasonality(series):
-            if len(series) < 24:
-                return False
-            cv = series.std() / max(series.mean(), 1)
-            return cv > 0.10
-
-        # =====================================================
-        # FORECAST LOOP
-        # =====================================================
-        forecast_rows = []
-
-        for customer in customers:
-            temp = df[df["ProfitCenter"] == customer].copy()
-            temp = temp.sort_values("MonthDate").reset_index(drop=True)
-
-            if len(temp) < 3:
-                continue
-
-            st.markdown(f"### Raw Data Check: {customer}")
-            st.write(temp[[
-                "Month", "RawMaterialInventory", "ProductionRevenue",
-                "ReceivingTransaction", "LocationTransferTransaction", "ShippingTransaction"
-            ]])
-
-            # -------------------------------------------------
-            # FORECAST RAW MATERIAL
-            # -------------------------------------------------
-            has_seasonality = check_seasonality(temp["RawMaterialInventory"])
-
-            try:
-                if STATS_AVAILABLE and len(temp) >= 24:
-                    model_rm = ExponentialSmoothing(
-                        temp["RawMaterialInventory"], trend="add",
-                        seasonal="add", seasonal_periods=12
-                    ).fit()
-                    forecast_rm = model_rm.forecast(6)
-                    model_used  = "Holt-Winters"
-
-                elif STATS_AVAILABLE and len(temp) >= 12:
-                    model_rm = ExponentialSmoothing(
-                        temp["RawMaterialInventory"], trend="add", seasonal=None
-                    ).fit()
-                    forecast_rm = model_rm.forecast(6)
-                    model_used  = "Holt Trend"
-
-                else:
-                    avg_growth = (
-                        temp["RawMaterialInventory"]
-                        .pct_change().replace([np.inf, -np.inf], np.nan).fillna(0).mean()
-                    )
-                    avg_growth  = np.clip(avg_growth, -0.30, 0.30)
-                    last_value  = temp["RawMaterialInventory"].iloc[-1]
-                    forecast_rm = []
-                    for _ in range(6):
-                        next_value = last_value * (1 + avg_growth)
-                        forecast_rm.append(max(next_value, 0))
-                        last_value = next_value
-                    forecast_rm = pd.Series(forecast_rm)
-                    model_used  = "Average Growth"
-
-            except Exception as e:
-                st.warning(f"Forecast fallback [{customer}]: {e}")
-                avg_growth = (
-                    temp["RawMaterialInventory"]
-                    .pct_change().replace([np.inf, -np.inf], np.nan).fillna(0).mean()
-                )
-                avg_growth  = np.clip(avg_growth, -0.30, 0.30)
-                last_value  = temp["RawMaterialInventory"].iloc[-1]
-                forecast_rm = []
-                for _ in range(6):
-                    next_value = last_value * (1 + avg_growth)
-                    forecast_rm.append(max(next_value, 0))
-                    last_value = next_value
-                forecast_rm = pd.Series(forecast_rm)
-                model_used  = "Average Growth (Fallback)"
-
-            forecast_rm = forecast_rm.clip(lower=0).reset_index(drop=True)
-
-            # -------------------------------------------------
-            # FORECAST REVENUE — rolling 12 thang
-            # -------------------------------------------------
-            window      = min(12, len(temp))
-            avg_rev_12m = temp["ProductionRevenue"].iloc[-window:].mean()
-            avg_rm_12m  = temp["RawMaterialInventory"].iloc[-window:].mean()
-
-            if avg_rm_12m > 0:
-                forecast_rev = (avg_rev_12m * (forecast_rm / avg_rm_12m)).clip(lower=0)
-            else:
-                forecast_rev = pd.Series([avg_rev_12m] * 6)
-            forecast_rev = forecast_rev.reset_index(drop=True)
-
-            # -------------------------------------------------
-            # OPERATIONAL RATIOS
-            # -------------------------------------------------
-            avg_receiving_ratio = np.clip(
-                temp["ReceivingTransaction"].sum() / max(temp["RawMaterialInventory"].sum(), 1), 0, 5)
-            avg_shipping_ratio  = np.clip(
-                temp["ShippingTransaction"].sum()  / max(temp["ProductionRevenue"].sum(), 1),    0, 5)
-            avg_transfer_ratio  = np.clip(
-                temp["LocationTransferTransaction"].sum() / max(temp["ReceivingTransaction"].sum(), 1), 0, 5)
-            avg_fg_ratio        = np.clip(
-                temp["FG_Pallet"].sum() / max(temp["ProductionRevenue"].sum(), 1),    0, 5)
-            avg_rm_ratio        = np.clip(
-                temp["RM_Pallet"].sum() / max(temp["RawMaterialInventory"].sum(), 1), 0, 5)
-            avg_bin_ratio       = np.clip(
-                temp["NoOfBin"].sum()   / max(temp["RawMaterialInventory"].sum(), 1), 0, 5)
-
-            # consumption_ratio = RM / Revenue (dung huong)
-            consumption_ratio = np.clip(
-                temp["RawMaterialInventory"].sum() / max(temp["ProductionRevenue"].sum(), 1), 0, 5)
-
-            # -------------------------------------------------
-            # FORECAST FUTURE MONTHS
-            # -------------------------------------------------
-            inventory = temp["RawMaterialInventory"].iloc[-1]
-
-            for i, month in enumerate(future_months):
-                production_revenue = max(forecast_rev.iloc[i], 0)
-                raw_material       = max(forecast_rm.iloc[i],  0)
-
-                receiving = raw_material       * avg_receiving_ratio
-                shipping  = production_revenue * avg_shipping_ratio
-                transfer  = receiving          * avg_transfer_ratio
-                fg_pallet = production_revenue * avg_fg_ratio
-                rm_pallet = raw_material       * avg_rm_ratio
-                no_of_bin = raw_material       * avg_bin_ratio
-
-                total_transaction = receiving + shipping + transfer
-                no_of_pallet      = fg_pallet + rm_pallet
-
-                rm_consumed    = production_revenue * consumption_ratio
-                inventory_next = max(inventory + receiving - rm_consumed, 0)
-
-                warehouse_capacity = no_of_pallet * (1 + alpha - beta)
-                holding_cost       = raw_material * 0.15
-                shortage_cost      = max(raw_material - inventory_next, 0) * 0.30
-                capacity_cost      = warehouse_capacity * 2
-                transaction_cost   = total_transaction * 0.50
-                warehouse_cost     = holding_cost + shortage_cost + capacity_cost + transaction_cost
-
-                forecast_rows.append({
-                    "Month":                       month,
-                    "ProfitCenter":                customer,
-                    "ForecastModel":               model_used,
-                    "ProductionRevenue":           round(production_revenue, 0),
-                    "RawMaterialInventory":        round(raw_material,       0),
-                    "ReceivingTransaction":        round(receiving,          0),
-                    "LocationTransferTransaction": round(transfer,           0),
-                    "ShippingTransaction":         round(shipping,           0),
-                    "TotalTransaction":            round(total_transaction,  0),
-                    "FG_Pallet":                   round(fg_pallet,          0),
-                    "RM_Pallet":                   round(rm_pallet,          0),
-                    "NoOfPallet":                  round(no_of_pallet,       0),
-                    "NoOfBin":                     round(no_of_bin,          0),
-                    "WarehouseCapacity":           round(warehouse_capacity, 0),
-                    "WarehouseCost":               round(warehouse_cost,     0)
-                })
-
-                inventory = inventory_next
-
-        # =====================================================
-        # FORECAST DATAFRAME
-        # =====================================================
-        forecast_df = pd.DataFrame(forecast_rows)
-        if forecast_df.empty:
-            st.error("No forecast generated.")
-            st.stop()
-
-        forecast_df["MonthDate"] = pd.to_datetime(
-            forecast_df["Month"], format="%b'%y", errors="coerce"
-        )
-        forecast_df = forecast_df.sort_values("MonthDate")
-
-        # =====================================================
-        # FORECAST VALIDATION — Train/Test Split
-        # Dung selected_model tu forecast_df -> 100% dong nhat
-        # =====================================================
-        validation_rows = []
-
-        for customer in customers:
-            temp = df[df["ProfitCenter"] == customer].copy()
-            temp = temp.sort_values("MonthDate").reset_index(drop=True)
-
-            if len(temp) < 9:
-                continue
-
-            train  = temp["RawMaterialInventory"].iloc[:-6]
-            test   = temp["RawMaterialInventory"].iloc[-6:]
-            actual = test.values
-
-            # Lay dung model ma Forecast da chon cho customer nay
-            selected_model = forecast_df.loc[
-                forecast_df["ProfitCenter"] == customer, "ForecastModel"
-            ].iloc[0]
-
-            try:
-
-                if selected_model == "Holt-Winters":
-
-                    # Validate Holt-Winters using fitted values
-                    model_val = ExponentialSmoothing(
-                        temp["RawMaterialInventory"],
-                        trend="add",
-                        seasonal="add",
-                        seasonal_periods=12,
-                        initialization_method="estimated"
-                    ).fit()
-
-                    actual = temp["RawMaterialInventory"].values
-                    predicted = model_val.fittedvalues.values
-
-                    val_model = "Holt-Winters"
-
-                elif selected_model == "Holt Trend":
-
-                    model_val = ExponentialSmoothing(
-                        train,
-                        trend="add",
-                        seasonal=None,
-                        initialization_method="estimated"
-                    ).fit()
-
-                    actual = test.values
-                    predicted = model_val.forecast(len(test)).values
-
-                    val_model = "Holt Trend"
-
-                else:
-
-                    avg_growth = (
-                        train.pct_change()
-                        .replace([np.inf, -np.inf], np.nan)
-                        .fillna(0)
-                        .mean()
-                    )
-
-                    avg_growth = np.clip(avg_growth, -0.30, 0.30)
-
-                    last_value = train.iloc[-1]
-
-                    predicted = []
-
-                    for _ in range(len(test)):
-                        next_value = last_value * (1 + avg_growth)
-                        predicted.append(max(next_value, 0))
-                        last_value = next_value
-
-                    actual = test.values
-                    predicted = np.array(predicted)
-
-                    val_model = "Average Growth"
-
-            except Exception as e:
-
-                st.warning(f"Validation fallback [{customer}]: {e}")
-
-                avg_growth = (
-                    train.pct_change()
-                    .replace([np.inf, -np.inf], np.nan)
-                    .fillna(0)
-                    .mean()
-                )
-
-                avg_growth = np.clip(avg_growth, -0.30, 0.30)
-
-                last_value = train.iloc[-1]
-
-                predicted = []
-
-                for _ in range(len(test)):
-                    next_value = last_value * (1 + avg_growth)
-                    predicted.append(max(next_value, 0))
-                    last_value = next_value
-
-                actual = test.values
-                predicted = np.array(predicted)
-
-                val_model = "Average Growth (Fallback)"
-
-            if len(actual) != len(predicted):
-                min_len = min(len(actual), len(predicted))
-                actual = actual[-min_len:]
-                predicted = predicted[-min_len:]
-
-            mae  = mean_absolute_error(actual, predicted)
-            rmse = np.sqrt(mean_squared_error(actual, predicted))
-            mape = np.mean(
-                np.abs((actual - predicted) / np.where(actual == 0, 1, actual))
-            ) * 100
-
-            validation_rows.append({
-                "ProfitCenter": customer,
-                "ModelUsed":    val_model,
-                "MAE":          round(mae,  2),
-                "RMSE":         round(rmse, 2),
-                "MAPE (%)":     round(mape, 2)
-            })
-
-        validation_df = pd.DataFrame(validation_rows)
-        st.subheader("Forecast Accuracy Validation (Train/Test Split)")
-        st.dataframe(validation_df, use_container_width=True)
-
-        # =====================================================
-        # MODEL SUMMARY PER CUSTOMER
-        # =====================================================
-        st.subheader("Forecast Model Selection Summary")
-        model_summary = (
-            forecast_df[["ProfitCenter", "ForecastModel"]]
-            .drop_duplicates()
-            .reset_index(drop=True)
-        )
-        st.dataframe(model_summary, use_container_width=True)
-
-        # =====================================================
-        # KPI DASHBOARD
-        # =====================================================
-        st.subheader("KPI Dashboard")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Warehouse Cost",       f"{forecast_df['WarehouseCost'].sum():,.0f}")
-        col2.metric("Average Warehouse Capacity", f"{forecast_df['WarehouseCapacity'].mean():,.0f}")
-        col3.metric("Average Transaction",        f"{forecast_df['TotalTransaction'].mean():,.0f}")
-
-        # =====================================================
-        # CUSTOMER DEMAND SEGMENTATION
-        # =====================================================
-        st.subheader("Customer Demand Segmentation")
-        st.dataframe(customer_summary, use_container_width=True)
-
-        # =====================================================
-        # PLANNING MATRIX
-        # =====================================================
-        st.subheader("EMS Forecast Planning Matrix")
-
-        categories = {
-            "Production Revenue":               "ProductionRevenue",
-            "130000 - Raw Materials Inventory": "RawMaterialInventory",
-            "Receiving transaction":            "ReceivingTransaction",
-            "Location transfer transaction":    "LocationTransferTransaction",
-            "Shipping transaction":             "ShippingTransaction",
-            "Total transaction":                "TotalTransaction",
-            "No. of Bin":                       "NoOfBin",
-            "No. of pallet":                    "NoOfPallet",
-            "FG Pallet":                        "FG_Pallet",
-            "Raw Material Pallet":              "RM_Pallet"
-        }
-
-        matrix_data = []
-        for category, col_name in categories.items():
-            for customer in customers:
-                temp_f = forecast_df[forecast_df["ProfitCenter"] == customer]
-                if temp_f.empty:
-                    continue
-                row = {"Categories": category, "ProfitCenter": customer}
-                for _, r in temp_f.iterrows():
-                    row[r["Month"]] = round(r[col_name], 0)
-                matrix_data.append(row)
-
-        matrix_df = pd.DataFrame(matrix_data)
-        st.dataframe(matrix_df, use_container_width=True)
-
-        # =====================================================
-        # CHART
-        # =====================================================
-        st.subheader("Raw Material Inventory Forecast")
-        fig = px.line(
-            forecast_df, x="Month", y="RawMaterialInventory",
-            color="ProfitCenter", title="Raw Material Inventory Forecast", markers=True
-        )
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+APP_TITLE = "HCMIC EMS Data Mining & Warehouse Planning System"
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+# ---- Data schema -------------------------------------------------------------
+REQUIRED_COLS = [
+    "Month", "ProfitCenter", "ProductionRevenue", "RawMaterialInventory",
+    "ReceivingTransaction", "LocationTransferTransaction", "ShippingTransaction",
+    "FG_Pallet", "RM_Pallet", "NoOfBin",
+]
+NUMERIC_COLS = [
+    "ProductionRevenue", "RawMaterialInventory", "ReceivingTransaction",
+    "LocationTransferTransaction", "ShippingTransaction",
+    "FG_Pallet", "RM_Pallet", "NoOfBin",
+]
+TARGET = "RawMaterialInventory"           # primary Stage 1 forecasting target
+MONTH_INPUT_FORMAT = "%b'%y"               # e.g. Mar'26
+MONTH_LABEL_FORMAT = "%b'%y"
+
+# ---- Stage 1: feature engineering / modelling ---------------------------------
+FEATURE_COLS = [
+    "RM_Lag1", "RM_Lag2", "RM_MA3", "RM_STD3", "RM_CV3",
+    "Year", "MonthNumber", "Quarter", "MonthSin", "MonthCos",
+]
+ROLLING_WINDOW = 3
+FEATURE_WARMUP_ROWS = 3                    # rows lost per ProfitCenter to shift(1).rolling(3)
+FORECAST_HORIZON = 6                       # production forecast: next 6 months
+TEST_HORIZON = 6                           # final hold-out test: last 6 months
+DEFAULT_VALIDATION_FRACTION = 0.20         # later 20% of pre-test rows = validation
+MIN_VALIDATION_ROWS = 2
+MIN_TRAIN_FIT_ROWS = 4
+DEFAULT_MIN_PRETEST_ROWS = 8               # usable modelling rows required before the test period
+NEAR_ZERO_TOL = 1e-6                       # |actual| below this is excluded from MAPE / WMAPE
+EPS = 1e-9
+
+VALIDATION_MODES = {
+    "Recursive multi-step (same protocol as the final forecast)": "recursive",
+    "One-step-ahead (actual lag features inside validation set)": "one_step",
+}
+
+# ---- CV-based statistical demand segmentation ---------------------------------
+CV_STABLE_MAX = 0.20                       # CV <  0.20        -> Stable
+CV_VOLATILE_MIN = 0.50                     # CV >= 0.50        -> Volatile (else Moderate)
+
+# ---- Stage 2: warehouse planning (unchanged from the original application) -----
+ALPHA = 0.20                               # capacity flexibility / buffer
+BETA = 0.10                                # capacity reduction / adjustment factor
+REVENUE_WINDOW_MONTHS = 12
+RATIO_CLIP_MAX = 5
+HOLDING_COST_RATE = 0.15
+SHORTAGE_COST_RATE = 0.30
+CAPACITY_COST_RATE = 2.00
+TRANSACTION_COST_RATE = 0.50
+
+# Chart colours (navy / blue / teal academic palette)
+COLOR_ACTUAL = "#1F3A5F"
+COLOR_TEST = "#E07B00"
+COLOR_FUTURE = "#0F7C8A"
+
+
+class DataError(Exception):
+    """Raised for fatal input-data problems (the app shows the message and stops)."""
+
+
+# =============================================================================
+# GENERIC UI / UTILITY HELPERS
+# =============================================================================
+def show_df(df, **kwargs):
+    """st.dataframe wrapper that works across Streamlit versions."""
+    try:
+        st.dataframe(df, width="stretch", **kwargs)
+    except Exception:
+        try:
+            st.dataframe(df, use_container_width=True, **kwargs)
+        except Exception:
+            st.dataframe(df.astype(str), **kwargs)   # e.g. Arrow type problems
+
+
+def show_chart(fig):
+    """st.plotly_chart wrapper that works across Streamlit versions."""
+    try:
+        st.plotly_chart(fig, width="stretch")
+    except Exception:
         st.plotly_chart(fig, use_container_width=True)
 
-        # =====================================================
-        # FORECAST DATASET
-        # =====================================================
-        st.subheader("Forecast Dataset")
-        st.dataframe(forecast_df, use_container_width=True)
 
-        # =====================================================
-        # DOWNLOAD
-        # =====================================================
-        st.subheader("Download")
-        col_dl1, col_dl2 = st.columns(2)
+def show_messages(messages):
+    """Display (level, text) messages produced by the pipeline functions."""
+    for level, text in messages:
+        if level == "error":
+            st.error(text)
+        elif level == "warning":
+            st.warning(text)
+        else:
+            st.info(text)
 
-        with col_dl1:
-            model_map = model_summary.set_index("ProfitCenter")["ForecastModel"]
-            matrix_with_model = matrix_df.copy()
-            matrix_with_model.insert(
-                2, "ForecastModel",
-                matrix_with_model["ProfitCenter"].map(model_map)
-            )
-            csv_matrix = matrix_with_model.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Forecast Matrix CSV",
-                data=csv_matrix,
-                file_name="EMS_Forecast_Matrix.csv",
-                mime="text/csv"
-            )
 
-        with col_dl2:
-            csv_full = forecast_df.drop(columns=["MonthDate"]).to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Full Forecast Dataset CSV",
-                data=csv_full,
-                file_name="EMS_Forecast_Full.csv",
-                mime="text/csv"
-            )
+def round_df(df, decimals=2):
+    """Round every float column (display / CSV friendliness)."""
+    out = df.copy()
+    float_cols = out.select_dtypes(include=["float", "float32", "float64"]).columns
+    out[float_cols] = out[float_cols].round(decimals)
+    return out
 
-st.markdown("---")
-st.caption("HCMIC EMS Forecasting & Warehouse Optimization System")
+
+def to_csv_bytes(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def month_diff(later, earlier):
+    """Whole months between two timestamps (later - earlier)."""
+    return (later.year - earlier.year) * 12 + (later.month - earlier.month)
+
+
+# =============================================================================
+# STAGE 1 - STEP 1: DATA PREPROCESSING
+# =============================================================================
+def parse_month_column(series):
+    """Parse the Month column to month-start timestamps (primary format: Mar'26)."""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        parsed = pd.to_datetime(series, errors="coerce")
+    else:
+        text = series.astype(str).str.strip()
+        parsed = pd.to_datetime(text, format=MONTH_INPUT_FORMAT, errors="coerce")
+        failed = parsed.isna()
+        if failed.any():                       # tolerate other common date formats
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                parsed.loc[failed] = pd.to_datetime(text[failed], errors="coerce")
+    return parsed.dt.to_period("M").dt.to_timestamp()
+
+
+def build_data_quality_table(df):
+    """Per-ProfitCenter history length, date span and gap diagnostics."""
+    rows = []
+    for pc, g in df.groupby("ProfitCenter", sort=True):
+        first, last = g["MonthDate"].min(), g["MonthDate"].max()
+        span = month_diff(last, first) + 1
+        rows.append({
+            "ProfitCenter": pc,
+            "DataLength": len(g),
+            "FirstMonth": first.strftime(MONTH_LABEL_FORMAT),
+            "LastMonth": last.strftime(MONTH_LABEL_FORMAT),
+            "MissingMonthsInSpan": span - len(g),
+            "ConstantRMSeries": bool(g[TARGET].nunique() <= 1),
+        })
+    return pd.DataFrame(rows)
+
+
+def preprocess_data(raw_df):
+    """
+    Clean the uploaded dataset and build a monthly series per ProfitCenter.
+
+    Steps: validate columns -> clean ProfitCenter -> numeric conversion ->
+    fill missing numeric values with 0 -> parse Month -> merge duplicate
+    (ProfitCenter, Month) rows -> remove non-positive-activity rows -> sort.
+
+    Returns (clean_df, report). Raises DataError for fatal problems.
+    """
+    report = {"messages": []}
+    df = raw_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    missing_cols = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing_cols:
+        raise DataError(f"Missing Columns: {missing_cols}")
+
+    df = df[REQUIRED_COLS].copy()
+    report["rows_input"] = len(df)
+
+    # ---- ProfitCenter ----
+    df["ProfitCenter"] = (
+        df["ProfitCenter"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    )
+    bad_pc = df["ProfitCenter"].isna() | df["ProfitCenter"].isin(["", "nan", "None", "NaT", "<NA>"])
+    report["rows_missing_profitcenter"] = int(bad_pc.sum())
+    df = df[~bad_pc]
+
+    # ---- Numeric conversion + missing values ----
+    missing_filled = {}
+    for col in NUMERIC_COLS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        n_missing = int(df[col].isna().sum())
+        if n_missing:
+            missing_filled[col] = n_missing
+    df[NUMERIC_COLS] = df[NUMERIC_COLS].fillna(0)
+    report["missing_filled"] = missing_filled
+    if missing_filled:
+        report["messages"].append((
+            "warning",
+            f"Missing / non-numeric values were replaced by 0 in: {missing_filled}. "
+            f"Check that a filled RawMaterialInventory value does not hide a true gap."))
+
+    # ---- Month ----
+    df["MonthDate"] = parse_month_column(df["Month"])
+    if df["MonthDate"].isna().all():
+        raise DataError("Month format invalid. Use format like Mar'26")
+    n_bad_dates = int(df["MonthDate"].isna().sum())
+    report["rows_invalid_date"] = n_bad_dates
+    if n_bad_dates:
+        report["messages"].append(("warning", f"{n_bad_dates} row(s) with an invalid Month were dropped."))
+    df = df.dropna(subset=["MonthDate"])
+
+    # ---- Duplicate (ProfitCenter, Month) rows ----
+    dup_mask = df.duplicated(["ProfitCenter", "MonthDate"], keep=False)
+    report["rows_duplicate_merged"] = int(dup_mask.sum())
+    if dup_mask.any():
+        df = df.groupby(["ProfitCenter", "MonthDate"], as_index=False)[NUMERIC_COLS].sum()
+        report["messages"].append((
+            "warning",
+            f"{int(dup_mask.sum())} rows shared the same ProfitCenter/Month and were merged by summation."))
+
+    df["Month"] = df["MonthDate"].dt.strftime(MONTH_LABEL_FORMAT)
+
+    # ---- Remove invalid / non-positive activity rows ----
+    df["TotalActivity"] = df["RawMaterialInventory"] + df["ReceivingTransaction"] + df["ShippingTransaction"]
+    n_before = len(df)
+    df = df[df["TotalActivity"] > 0]
+    report["rows_inactive_removed"] = n_before - len(df)
+    if df.empty:
+        raise DataError("No valid rows remain after cleaning (all rows have non-positive activity).")
+
+    df = df.sort_values(["ProfitCenter", "MonthDate"]).reset_index(drop=True)
+    report["rows_output"] = len(df)
+    report["quality_table"] = build_data_quality_table(df)
+
+    q = report["quality_table"]
+    if (q["MissingMonthsInSpan"] > 0).any():
+        report["messages"].append((
+            "warning",
+            "Some ProfitCenters have missing months inside their date span (see data-quality table). "
+            "Lag/rolling features are computed over the observed rows, so a gap shifts the lag window."))
+    if q["ConstantRMSeries"].any():
+        report["messages"].append((
+            "warning",
+            "Constant RawMaterialInventory series detected for: "
+            f"{q.loc[q['ConstantRMSeries'], 'ProfitCenter'].tolist()}. "
+            "ML models can only reproduce the constant level for these ProfitCenters."))
+    return df, report
+
+
+# =============================================================================
+# STAGE 1 - STEP 2: FEATURE ENGINEERING (leakage-free)
+# =============================================================================
+def add_calendar_features(frame):
+    """Add Year, MonthNumber, Quarter and cyclical MonthSin/MonthCos from MonthDate."""
+    out = frame.copy()
+    dates = out["MonthDate"]
+    out["Year"] = dates.dt.year
+    out["MonthNumber"] = dates.dt.month
+    out["Quarter"] = dates.dt.quarter
+    out["MonthSin"] = np.sin(2 * np.pi * out["MonthNumber"] / 12)
+    out["MonthCos"] = np.cos(2 * np.pi * out["MonthNumber"] / 12)
+    return out
+
+
+def create_features(df):
+    """
+    Leakage-free features per ProfitCenter.
+
+    RM_Lag1, RM_Lag2          : RawMaterialInventory shifted by 1 / 2 months
+    RM_MA3, RM_STD3           : shift(1).rolling(3) mean / std  (current month EXCLUDED)
+    RM_CV3                    : RM_STD3 / RM_MA3
+    Year, MonthNumber, Quarter, MonthSin, MonthCos : calendar features
+
+    The first FEATURE_WARMUP_ROWS rows of each ProfitCenter have NaN features
+    (insufficient history) and are excluded from modelling.
+    """
+    out = df.sort_values(["ProfitCenter", "MonthDate"]).reset_index(drop=True).copy()
+    grp = out.groupby("ProfitCenter")[TARGET]
+
+    out["RM_Lag1"] = grp.shift(1)
+    out["RM_Lag2"] = grp.shift(2)
+    out["RM_MA3"] = grp.transform(lambda s: s.shift(1).rolling(ROLLING_WINDOW).mean())
+    out["RM_STD3"] = grp.transform(lambda s: s.shift(1).rolling(ROLLING_WINDOW).std())
+
+    ma, sd = out["RM_MA3"], out["RM_STD3"]
+    cv = sd / ma.where(ma.abs() > EPS)                         # NaN when the mean is ~0
+    out["RM_CV3"] = cv.mask(ma.abs().le(EPS) & sd.notna(), 0.0)  # all-zero window -> CV = 0
+
+    return add_calendar_features(out)
+
+
+def build_feature_row(history, month_date):
+    """
+    Feature vector (1-row DataFrame) for the month AFTER `history`.
+    Uses exactly the same definitions as create_features(), computed from the last
+    three values of `history` (historical actuals and/or previous predictions).
+    """
+    h = np.asarray(history, dtype=float)
+    if len(h) < ROLLING_WINDOW:
+        raise ValueError(f"At least {ROLLING_WINDOW} historical values are required to build features.")
+    window = h[-ROLLING_WINDOW:]
+    ma = float(window.mean())
+    sd = float(window.std(ddof=1))                              # same ddof as pandas rolling().std()
+    cv = sd / ma if abs(ma) > EPS else 0.0
+    row = pd.DataFrame({
+        "MonthDate": [pd.Timestamp(month_date)],
+        "RM_Lag1": [h[-1]], "RM_Lag2": [h[-2]],
+        "RM_MA3": [ma], "RM_STD3": [sd], "RM_CV3": [cv],
+    })
+    return add_calendar_features(row)[FEATURE_COLS]
+
+
+# =============================================================================
+# STAGE 1 - STEP 3: DEMAND PATTERN ANALYSIS + CV-BASED STATISTICAL SEGMENTATION
+# =============================================================================
+def classify_trend(growth_pct):
+    """Trend label from first-to-last growth % (thresholds unchanged from the original app)."""
+    if growth_pct >= 50:
+        return "Strong Increasing"
+    if growth_pct >= 15:
+        return "Increasing"
+    if growth_pct >= 5:
+        return "Slight Increasing"
+    if growth_pct <= -50:
+        return "Strong Decreasing"
+    if growth_pct <= -15:
+        return "Decreasing"
+    if growth_pct <= -5:
+        return "Slight Decreasing"
+    return "Stable"
+
+
+def analyze_demand_patterns(df):
+    """Per-ProfitCenter descriptive statistics of RawMaterialInventory (data-mining step)."""
+    rows = []
+    for pc, g in df.groupby("ProfitCenter", sort=True):
+        g = g.sort_values("MonthDate")
+        rm = g[TARGET]
+        n = len(g)
+        rm_mean = float(rm.mean())
+        rm_std = float(rm.std()) if n >= 2 else np.nan
+        if n < 2:
+            cv = np.nan                                  # CV undefined with a single observation
+        else:
+            cv = rm_std / rm_mean if rm_mean > EPS else 0.0
+
+        if n < 2:
+            growth_pct, trend = 0.0, "Insufficient Data"
+        else:
+            first_v, last_v = float(rm.iloc[0]), float(rm.iloc[-1])
+            growth_pct = (last_v - first_v) / first_v * 100 if first_v != 0 else 0.0
+            trend = classify_trend(growth_pct)
+
+        rows.append({
+            "ProfitCenter": pc,
+            "DataLength": n,
+            "RM_Mean": rm_mean,
+            "RM_STD": rm_std,
+            "CV": cv,
+            "RM_Min": float(rm.min()),
+            "RM_Max": float(rm.max()),
+            "ZeroRM_Months": int((rm <= 0).sum()),
+            "ReceivingTransaction_Mean": float(g["ReceivingTransaction"].mean()),
+            "NoOfBin_Mean": float(g["NoOfBin"].mean()),
+            "GrowthPercent": round(growth_pct, 2),
+            "Trend": trend,
+        })
+    return pd.DataFrame(rows)
+
+
+def segment_customers(pattern_df):
+    """
+    CV-Based Statistical Demand Segmentation (statistical thresholds, NOT clustering):
+        Stable   : CV <  0.20
+        Moderate : 0.20 <= CV < 0.50
+        Volatile : CV >= 0.50
+    The segment characterises variability; it does not choose the model.
+    """
+    out = pattern_df.copy()
+    out["DemandSegment"] = np.select(
+        [out["CV"].isna(), out["CV"] >= CV_VOLATILE_MIN, out["CV"] >= CV_STABLE_MAX],
+        ["Undetermined", "Volatile", "Moderate"],
+        default="Stable",
+    )
+    out["DemandBehavior"] = out["DemandSegment"] + " variability, " + out["Trend"].str.lower() + " level"
+    return out
+
+
+# =============================================================================
+# STAGE 1 - STEP 4: MACHINE LEARNING PREDICTIVE MODELING
+# =============================================================================
+def build_ml_models():
+    """
+    Return (factories, unavailable).
+    factories   : {model name: zero-argument callable returning a fresh regressor}
+    unavailable : {model name: reason the library could not be imported}
+    Hyper-parameters are deliberately conservative for small monthly datasets.
+    """
+    factories, unavailable = {}, {}
+
+    try:
+        from xgboost import XGBRegressor
+        factories["XGBoost"] = lambda: XGBRegressor(
+            n_estimators=200, learning_rate=0.05, max_depth=3, min_child_weight=1,
+            subsample=1.0, colsample_bytree=0.8, reg_lambda=1.0,
+            objective="reg:squarederror", random_state=RANDOM_STATE, n_jobs=1, verbosity=0)
+    except Exception as exc:                                   # ImportError, OSError, ...
+        unavailable["XGBoost"] = f"{type(exc).__name__}: {exc}"
+
+    try:
+        from lightgbm import LGBMRegressor
+        factories["LightGBM"] = lambda: LGBMRegressor(
+            n_estimators=200, learning_rate=0.05, num_leaves=7, max_depth=3,
+            min_child_samples=2, min_data_in_bin=1,            # tiny monthly datasets
+            subsample=1.0, colsample_bytree=0.8, random_state=RANDOM_STATE,
+            n_jobs=1, verbose=-1)
+    except Exception as exc:
+        unavailable["LightGBM"] = f"{type(exc).__name__}: {exc}"
+
+    try:
+        from catboost import CatBoostRegressor
+        factories["CatBoost"] = lambda: CatBoostRegressor(
+            iterations=300, learning_rate=0.05, depth=4, loss_function="RMSE",
+            random_seed=RANDOM_STATE, verbose=0, allow_writing_files=False, thread_count=1)
+    except Exception as exc:
+        unavailable["CatBoost"] = f"{type(exc).__name__}: {exc}"
+
+    return factories, unavailable
+
+
+def fit_model(factory, train_df):
+    """Fit a fresh model on the engineered features -> RawMaterialInventory."""
+    model = factory()
+    model.fit(train_df[FEATURE_COLS], train_df[TARGET].astype(float).values)
+    return model
+
+
+def calculate_metrics(actual, predicted):
+    """
+    MAE, RMSE, MAPE (%), WMAPE (%).
+    MAPE ignores observations with |actual| <= NEAR_ZERO_TOL (returns NaN if none);
+    WMAPE = sum|error| / sum|actual| (returns NaN if the denominator is ~0).
+    """
+    a = np.asarray(actual, dtype=float)
+    p = np.asarray(predicted, dtype=float)
+    if a.size == 0 or a.size != p.size:
+        raise ValueError("Actual and predicted arrays are empty or have different lengths.")
+    if not np.all(np.isfinite(p)):
+        raise ValueError("Predictions contain NaN or infinite values.")
+
+    mae = float(mean_absolute_error(a, p))
+    rmse = float(np.sqrt(mean_squared_error(a, p)))
+    nonzero = np.abs(a) > NEAR_ZERO_TOL
+    mape = float(np.mean(np.abs((a[nonzero] - p[nonzero]) / a[nonzero])) * 100) if nonzero.any() else np.nan
+    denom = float(np.abs(a).sum())
+    wmape = float(np.abs(a - p).sum() / denom * 100) if denom > NEAR_ZERO_TOL else np.nan
+    return {"MAE": mae, "RMSE": rmse, "MAPE": mape, "WMAPE": wmape}
+
+
+def recursive_forecast_ml(model, history_values, forecast_dates):
+    """
+    Multi-step recursive forecast.
+
+    For every future month:
+        1. build RM_Lag1, RM_Lag2, RM_MA3, RM_STD3, RM_CV3 from the history so far
+           (historical actuals + PREVIOUS PREDICTIONS) and the calendar features;
+        2. predict the month;
+        3. append the prediction to the history and move to the next month.
+    No future actual RawMaterialInventory is ever used.
+    """
+    history = [float(v) for v in history_values]
+    predictions = []
+    for month_date in forecast_dates:
+        x_row = build_feature_row(history, month_date)
+        y_hat = float(model.predict(x_row)[0])
+        y_hat = max(y_hat, 0.0)                                 # inventory cannot be negative
+        predictions.append(y_hat)
+        history.append(y_hat)
+    return np.array(predictions)
+
+
+# =============================================================================
+# STAGE 1 - STEP 5: MODEL VALIDATION & SELECTION
+# =============================================================================
+def evaluate_models(factories, train_df, val_df, history_before_val, mode):
+    """
+    Validate every candidate model on the time-ordered validation set
+    (the later part of the PRE-TEST data; the final test set is never touched).
+
+    mode = "recursive" : validation months are forecast recursively from history_before_val
+    mode = "one_step"  : validation months are predicted from their actual lag features
+    """
+    rows = []
+    for name, factory in factories.items():
+        row = {"Model": name, "Validation_MAE": np.nan, "Validation_RMSE": np.nan,
+               "Validation_MAPE": np.nan, "Validation_WMAPE": np.nan,
+               "Status": "OK", "Error": ""}
+        try:
+            model = fit_model(factory, train_df)
+            if mode == "recursive":
+                pred = recursive_forecast_ml(model, history_before_val, val_df["MonthDate"])
+            else:
+                pred = np.clip(np.asarray(model.predict(val_df[FEATURE_COLS]), dtype=float), 0, None)
+            m = calculate_metrics(val_df[TARGET].values, pred)
+            row.update({"Validation_MAE": m["MAE"], "Validation_RMSE": m["RMSE"],
+                        "Validation_MAPE": m["MAPE"], "Validation_WMAPE": m["WMAPE"]})
+        except Exception as exc:
+            row["Status"] = "Failed"
+            row["Error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        rows.append(row)
+    return rows
+
+
+def select_best_model(validation_rows):
+    """Best model = lowest Validation MAE; Validation RMSE breaks ties. Returns None if all failed."""
+    ok = [r for r in validation_rows
+          if r["Status"] == "OK" and np.isfinite(r["Validation_MAE"])]
+    if not ok:
+        return None
+    best = min(ok, key=lambda r: (r["Validation_MAE"],
+                                  r["Validation_RMSE"] if np.isfinite(r["Validation_RMSE"]) else np.inf))
+    return best["Model"]
+
+
+def forecast_profitcenter(pc, pc_df, segment, factories, global_last_date,
+                          min_pretest_rows, val_fraction, validation_mode):
+    """
+    Complete Stage 1 workflow for ONE ProfitCenter.
+
+    1. chronological dataset with leakage-free features
+    2. drop rows whose lag/rolling features are unavailable
+    3. final hold-out TEST = last TEST_HORIZON months (never used for selection)
+    4. time-ordered train / validation split inside the pre-test data
+    5. validate XGBoost / LightGBM / CatBoost -> select by validation MAE (RMSE tie-break)
+    6. retrain the selected model on ALL pre-test rows -> recursive forecast of the test months
+    7. evaluate on the test set (MAE, RMSE, MAPE, WMAPE)
+    8. retrain the selected model on ALL history -> recursive forecast of the next 6 months
+
+    Never raises: problems are reported through result["Status"] / result["Reason"].
+    """
+    res = {
+        "ProfitCenter": pc, "DataLength": len(pc_df), "DemandSegment": segment,
+        "Status": "Forecasted", "Reason": "", "Notes": [],
+        "SelectedModel": None, "ValidationRows": [],
+        "TrainRows": 0, "ValRows": 0,
+        "TestMetrics": None, "TestPredictions": None, "Forecast": None,
+    }
+    n = len(pc_df)
+
+    # ---- explicit minimum-data rule ----
+    required = FEATURE_WARMUP_ROWS + TEST_HORIZON + min_pretest_rows
+    if n < required:
+        res.update(Status="Insufficient data", Reason=(
+            f"{n} months available; {required} required "
+            f"({FEATURE_WARMUP_ROWS} feature warm-up + {TEST_HORIZON} test + {min_pretest_rows} modelling months). "
+            f"No ML forecast is produced."))
+        return res
+
+    # ---- chronological split: pre-test | final test ----
+    test_start = n - TEST_HORIZON
+    model_rows = pc_df.iloc[:test_start].dropna(subset=FEATURE_COLS)
+    if len(model_rows) < min_pretest_rows:
+        res.update(Status="Insufficient data", Reason=(
+            f"Only {len(model_rows)} pre-test rows have complete lag/rolling features "
+            f"(minimum {min_pretest_rows})."))
+        return res
+
+    n_val = max(MIN_VALIDATION_ROWS, int(math.ceil(len(model_rows) * val_fraction)))
+    train_fit, val_df = model_rows.iloc[:-n_val], model_rows.iloc[-n_val:]
+    if len(train_fit) < MIN_TRAIN_FIT_ROWS:
+        res.update(Status="Insufficient data", Reason=(
+            f"Validation split leaves {len(train_fit)} training rows (minimum {MIN_TRAIN_FIT_ROWS})."))
+        return res
+    res["TrainRows"], res["ValRows"] = len(train_fit), len(val_df)
+
+    # ---- model validation & selection (pre-test data only) ----
+    history_before_val = pc_df[TARGET].iloc[:test_start - n_val].values
+    val_rows = evaluate_models(factories, train_fit, val_df, history_before_val, validation_mode)
+    selected = select_best_model(val_rows)
+    res["ValidationRows"] = val_rows
+    if selected is None:
+        errors = "; ".join(f"{r['Model']}: {r['Error']}" for r in val_rows if r["Error"])
+        res.update(Status="Training failed", Reason=f"All candidate models failed validation. {errors}")
+        return res
+    res["SelectedModel"] = selected
+    factory = factories[selected]
+
+    # ---- final test: retrain on ALL pre-test data, forecast the hold-out months ----
+    test_df = pc_df.iloc[test_start:]
+    try:
+        model_pre = fit_model(factory, model_rows)
+        test_pred = recursive_forecast_ml(model_pre, pc_df[TARGET].iloc[:test_start].values, test_df["MonthDate"])
+        res["TestMetrics"] = calculate_metrics(test_df[TARGET].values, test_pred)
+        res["TestPredictions"] = pd.DataFrame({
+            "ProfitCenter": pc,
+            "Month": test_df["MonthDate"].dt.strftime(MONTH_LABEL_FORMAT).values,
+            "MonthDate": test_df["MonthDate"].values,
+            "Actual": test_df[TARGET].values,
+            "Predicted": test_pred,
+            "SelectedModel": selected,
+        })
+    except Exception as exc:
+        res.update(Status="Training failed",
+                   Reason=f"Test-period forecast failed for {selected}: {type(exc).__name__}: {exc}")
+        return res
+
+    # ---- production forecast: retrain on ALL history, recursive 6 months ahead ----
+    try:
+        model_all = fit_model(factory, pc_df.dropna(subset=FEATURE_COLS))
+        last_date = pc_df["MonthDate"].max()
+        gap = max(month_diff(global_last_date, last_date), 0)
+        if gap > 0:
+            res["Notes"].append(
+                f"Series ends {gap} month(s) before the dataset's last month; the recursion "
+                f"bridges the gap with its own predictions before the {FORECAST_HORIZON}-month forecast.")
+        dates = pd.date_range(last_date + pd.DateOffset(months=1), periods=gap + FORECAST_HORIZON, freq="MS")
+        preds = recursive_forecast_ml(model_all, pc_df[TARGET].values, dates)[-FORECAST_HORIZON:]
+        dates = dates[-FORECAST_HORIZON:]
+        res["Forecast"] = pd.DataFrame({
+            "ProfitCenter": pc,
+            "Month": dates.strftime(MONTH_LABEL_FORMAT),
+            "MonthDate": dates,
+            "RM_Forecast": preds,
+            "SelectedModel": selected,
+            "DemandSegment": segment,
+        })
+    except Exception as exc:
+        res.update(Status="Training failed",
+                   Reason=f"Production forecast failed for {selected}: {type(exc).__name__}: {exc}")
+    return res
+
+
+@st.cache_data(show_spinner=False)
+def run_stage1_pipeline(feature_df, segmented_df, global_last_date,
+                        min_pretest_rows, val_fraction, validation_mode):
+    """
+    Run Stage 1 for every ProfitCenter and assemble the result tables.
+    (No Streamlit calls in here, so the cached result can be replayed safely.)
+    """
+    messages = []
+    factories, unavailable = build_ml_models()
+    out = {"available_models": list(factories), "unavailable_models": unavailable,
+           "messages": messages, "validation_df": pd.DataFrame(), "test_metrics_df": pd.DataFrame(),
+           "test_pred_df": pd.DataFrame(), "forecast_df": pd.DataFrame(),
+           "coverage_df": pd.DataFrame(), "summary_df": pd.DataFrame()}
+
+    if unavailable:
+        messages.append(("warning",
+            "Unavailable ML models: " + ", ".join(f"{k} ({v})" for k, v in unavailable.items()) +
+            ". Install with:  pip install xgboost lightgbm catboost"))
+    if not factories:
+        messages.append(("error",
+            "No ML library is available, so no forecast can be produced. "
+            "Install at least one candidate model:  pip install xgboost lightgbm catboost"))
+        return out
+
+    segment_map = segmented_df.set_index("ProfitCenter")["DemandSegment"].to_dict()
+    val_tables, test_tables, fc_tables, pred_tables, coverage, summary = [], [], [], [], [], []
+
+    for pc, g in feature_df.groupby("ProfitCenter", sort=True):
+        g = g.sort_values("MonthDate").reset_index(drop=True)
+        segment = segment_map.get(pc, "Undetermined")
+        try:
+            res = forecast_profitcenter(pc, g, segment, factories, global_last_date,
+                                        min_pretest_rows, val_fraction, validation_mode)
+        except Exception as exc:                                # last-resort guard: never crash the app
+            res = {"ProfitCenter": pc, "DataLength": len(g), "DemandSegment": segment,
+                   "Status": "Training failed", "Reason": f"Unexpected error: {type(exc).__name__}: {exc}",
+                   "Notes": [], "SelectedModel": None, "ValidationRows": [], "TestMetrics": None,
+                   "TestPredictions": None, "Forecast": None, "TrainRows": 0, "ValRows": 0}
+
+        for note in res["Notes"]:
+            messages.append(("warning", f"[{pc}] {note}"))
+        if res["Status"] != "Forecasted":
+            messages.append(("warning", f"[{pc}] {res['Status']}: {res['Reason']}"))
+
+        # --- validation comparison rows ---
+        sel_val = {}
+        for r in res["ValidationRows"]:
+            is_selected = (r["Model"] == res["SelectedModel"])
+            if is_selected:
+                sel_val = r
+            val_tables.append({
+                "ProfitCenter": pc, "DemandSegment": segment, "Model": r["Model"],
+                "Validation_MAE": r["Validation_MAE"], "Validation_RMSE": r["Validation_RMSE"],
+                "Validation_MAPE": r["Validation_MAPE"], "Validation_WMAPE": r["Validation_WMAPE"],
+                "SelectedModel": "Yes" if is_selected else "No",
+                "TrainRows": res["TrainRows"], "ValRows": res["ValRows"],
+                "Status": r["Status"], "Error": r["Error"],
+            })
+
+        tm = res["TestMetrics"]
+        if tm is not None:
+            test_tables.append({
+                "ProfitCenter": pc, "SelectedModel": res["SelectedModel"],
+                "Test_MAE": tm["MAE"], "Test_RMSE": tm["RMSE"],
+                "Test_MAPE": tm["MAPE"], "Test_WMAPE": tm["WMAPE"],
+            })
+        if res["TestPredictions"] is not None:
+            pred_tables.append(res["TestPredictions"])
+        if res["Forecast"] is not None:
+            fc_tables.append(res["Forecast"])
+
+        coverage.append({"ProfitCenter": pc, "DataLength": res["DataLength"], "DemandSegment": segment,
+                         "Status": res["Status"], "SelectedModel": res["SelectedModel"] or "-",
+                         "Reason": res["Reason"]})
+        summary.append({
+            "ProfitCenter": pc, "DataLength": res["DataLength"], "DemandSegment": segment,
+            "SelectedModel": res["SelectedModel"] or "-",
+            "ValidationMAE": sel_val.get("Validation_MAE", np.nan),
+            "ValidationRMSE": sel_val.get("Validation_RMSE", np.nan),
+            "TestMAE": tm["MAE"] if tm else np.nan, "TestRMSE": tm["RMSE"] if tm else np.nan,
+            "TestMAPE": tm["MAPE"] if tm else np.nan, "TestWMAPE": tm["WMAPE"] if tm else np.nan,
+            "Status": res["Status"],
+        })
+
+    def _concat(frames):
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    out["validation_df"] = pd.DataFrame(val_tables)
+    out["test_metrics_df"] = pd.DataFrame(test_tables)
+    out["test_pred_df"] = _concat(pred_tables)
+    out["forecast_df"] = _concat(fc_tables)
+    out["coverage_df"] = pd.DataFrame(coverage)
+    out["summary_df"] = pd.DataFrame(summary)
+    return out
+
+
+# =============================================================================
+# STAGE 2: DYNAMIC WAREHOUSE PLANNING (logic preserved from the original app)
+# =============================================================================
+def calculate_operational_ratios(hist):
+    """Historical operational ratios of one ProfitCenter (clipped to [0, RATIO_CLIP_MAX])."""
+    s = hist[NUMERIC_COLS].sum()
+
+    def ratio(numerator, denominator):
+        return float(np.clip(numerator / max(denominator, 1), 0, RATIO_CLIP_MAX))
+
+    return {
+        "ReceivingRatio": ratio(s["ReceivingTransaction"], s["RawMaterialInventory"]),
+        "ShippingRatio": ratio(s["ShippingTransaction"], s["ProductionRevenue"]),
+        "TransferRatio": ratio(s["LocationTransferTransaction"], s["ReceivingTransaction"]),
+        "FG_PalletRatio": ratio(s["FG_Pallet"], s["ProductionRevenue"]),
+        "RM_PalletRatio": ratio(s["RM_Pallet"], s["RawMaterialInventory"]),
+        "BinRatio": ratio(s["NoOfBin"], s["RawMaterialInventory"]),
+        "ConsumptionRatio": ratio(s["RawMaterialInventory"], s["ProductionRevenue"]),
+    }
+
+
+def calculate_warehouse_cost(raw_material, inventory_next, warehouse_capacity, total_transaction):
+    """Warehouse Cost Evaluation: holding + shortage + capacity + transaction cost."""
+    holding = raw_material * HOLDING_COST_RATE
+    shortage = max(raw_material - inventory_next, 0) * SHORTAGE_COST_RATE
+    capacity = warehouse_capacity * CAPACITY_COST_RATE
+    transaction = total_transaction * TRANSACTION_COST_RATE
+    return {"HoldingCost": holding, "ShortageCost": shortage, "CapacityCost": capacity,
+            "TransactionCost": transaction, "WarehouseCost": holding + shortage + capacity + transaction}
+
+
+def calculate_warehouse_requirements(pc, hist, rm_forecast, months, selected_model, segment):
+    """
+    Stage 2 for ONE ProfitCenter.
+
+    Input : Stage 1 forecast of RawMaterialInventory (Exogenous Forecast Input).
+    Output: one row per future month with revenue, transactions, pallets, bins,
+            inventory dynamics, capacity and cost. Returns (rows, ratios).
+    """
+    rm_forecast = np.clip(np.asarray(rm_forecast, dtype=float), 0, None)
+    ratios = calculate_operational_ratios(hist)
+
+    # Production revenue estimate: rolling 12-month revenue scaled by forecast / average RM
+    window = min(REVENUE_WINDOW_MONTHS, len(hist))
+    avg_rev = hist["ProductionRevenue"].iloc[-window:].mean()
+    avg_rm = hist[TARGET].iloc[-window:].mean()
+    if avg_rm > 0:
+        rev_forecast = np.clip(avg_rev * (rm_forecast / avg_rm), 0, None)
+    else:
+        rev_forecast = np.full(len(rm_forecast), avg_rev)
+
+    inventory = float(hist[TARGET].iloc[-1])                    # opening inventory = last actual
+    rows = []
+    for i, month in enumerate(months):
+        production_revenue = max(rev_forecast[i], 0)
+        raw_material = max(rm_forecast[i], 0)
+
+        receiving = raw_material * ratios["ReceivingRatio"]
+        shipping = production_revenue * ratios["ShippingRatio"]
+        transfer = receiving * ratios["TransferRatio"]
+        fg_pallet = production_revenue * ratios["FG_PalletRatio"]
+        rm_pallet = raw_material * ratios["RM_PalletRatio"]
+        no_of_bin = raw_material * ratios["BinRatio"]
+
+        total_transaction = receiving + shipping + transfer
+        no_of_pallet = fg_pallet + rm_pallet
+
+        # Inventory dynamics
+        rm_consumed = production_revenue * ratios["ConsumptionRatio"]
+        inventory_next = max(inventory + receiving - rm_consumed, 0)
+
+        # Capacity (contract flexibility) and cost
+        warehouse_capacity = no_of_pallet * (1 + ALPHA - BETA)
+        cost = calculate_warehouse_cost(raw_material, inventory_next, warehouse_capacity, total_transaction)
+
+        rows.append({
+            "Month": month,
+            "ProfitCenter": pc,
+            "ForecastModel": selected_model,
+            "ProductionRevenue": round(production_revenue, 0),
+            "RawMaterialInventory": round(raw_material, 0),
+            "ReceivingTransaction": round(receiving, 0),
+            "LocationTransferTransaction": round(transfer, 0),
+            "ShippingTransaction": round(shipping, 0),
+            "TotalTransaction": round(total_transaction, 0),
+            "FG_Pallet": round(fg_pallet, 0),
+            "RM_Pallet": round(rm_pallet, 0),
+            "NoOfPallet": round(no_of_pallet, 0),
+            "NoOfBin": round(no_of_bin, 0),
+            "WarehouseCapacity": round(warehouse_capacity, 0),
+            "WarehouseCost": round(cost["WarehouseCost"], 0),
+            # additional Stage 2 detail (new columns, appended)
+            "DemandSegment": segment,
+            "RM_Consumed": round(rm_consumed, 0),
+            "NextInventory": round(inventory_next, 0),
+            "HoldingCost": round(cost["HoldingCost"], 2),
+            "ShortageCost": round(cost["ShortageCost"], 2),
+            "CapacityCost": round(cost["CapacityCost"], 2),
+            "TransactionCost": round(cost["TransactionCost"], 2),
+        })
+        inventory = inventory_next
+    return rows, ratios
+
+
+def run_stage2(hist_df, stage1_forecast_df, segment_map, future_months):
+    """Apply Stage 2 to every ProfitCenter that has a Stage 1 forecast."""
+    all_rows, ratio_rows = [], []
+    for pc, fc in stage1_forecast_df.groupby("ProfitCenter", sort=True):
+        fc = fc.sort_values("MonthDate")
+        hist = hist_df[hist_df["ProfitCenter"] == pc].sort_values("MonthDate")
+        rows, ratios = calculate_warehouse_requirements(
+            pc, hist, fc["RM_Forecast"].values, fc["Month"].tolist(),
+            fc["SelectedModel"].iloc[0], segment_map.get(pc, "Undetermined"))
+        all_rows.extend(rows)
+        ratio_rows.append({"ProfitCenter": pc, **ratios})
+
+    forecast_df = pd.DataFrame(all_rows)
+    if forecast_df.empty:
+        return forecast_df, pd.DataFrame(ratio_rows)
+    forecast_df["MonthDate"] = pd.to_datetime(forecast_df["Month"], format=MONTH_LABEL_FORMAT, errors="coerce")
+    forecast_df = forecast_df.sort_values(["MonthDate", "ProfitCenter"], kind="stable").reset_index(drop=True)
+    return forecast_df, pd.DataFrame(ratio_rows)
+
+
+def generate_planning_matrix(forecast_df, profit_centers):
+    """EMS Forecast Planning Matrix: category x ProfitCenter x month."""
+    categories = {
+        "Production Revenue": "ProductionRevenue",
+        "130000 - Raw Materials Inventory": "RawMaterialInventory",
+        "Receiving transaction": "ReceivingTransaction",
+        "Location transfer transaction": "LocationTransferTransaction",
+        "Shipping transaction": "ShippingTransaction",
+        "Total transaction": "TotalTransaction",
+        "No. of Bin": "NoOfBin",
+        "No. of pallet": "NoOfPallet",
+        "FG Pallet": "FG_Pallet",
+        "Raw Material Pallet": "RM_Pallet",
+    }
+    rows = []
+    for category, col_name in categories.items():
+        for pc in profit_centers:
+            temp = forecast_df[forecast_df["ProfitCenter"] == pc]
+            if temp.empty:
+                continue
+            row = {"Categories": category, "ProfitCenter": pc}
+            row.update({m: round(v, 0) for m, v in zip(temp["Month"], temp[col_name])})
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# =============================================================================
+# CHARTS
+# =============================================================================
+def create_forecast_chart(pc, segment, model_name, hist, test_pred, future):
+    """Historical actual + final 6-month test prediction + future 6-month forecast."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=hist["MonthDate"], y=hist[TARGET], mode="lines+markers",
+        name="Historical Actual", line=dict(color=COLOR_ACTUAL, width=2)))
+
+    if test_pred is not None and not test_pred.empty:
+        fig.add_vrect(
+            x0=pd.Timestamp(test_pred["MonthDate"].min()).strftime("%Y-%m-%d"),
+            x1=pd.Timestamp(test_pred["MonthDate"].max()).strftime("%Y-%m-%d"),
+            fillcolor="rgba(224,123,0,0.08)", line_width=0, layer="below")
+        fig.add_trace(go.Scatter(
+            x=test_pred["MonthDate"], y=test_pred["Predicted"], mode="lines+markers",
+            name="Test Prediction (final 6-month hold-out)",
+            line=dict(color=COLOR_TEST, width=2, dash="dash"), marker=dict(symbol="diamond")))
+
+    if future is not None and not future.empty:
+        fig.add_trace(go.Scatter(
+            x=future["MonthDate"], y=future["RM_Forecast"], mode="lines+markers",
+            name="Future Forecast (next 6 months)",
+            line=dict(color=COLOR_FUTURE, width=2, dash="dot"), marker=dict(symbol="square")))
+
+    fig.update_layout(
+        title=f"ProfitCenter: {pc} | Demand Segment: {segment} | Selected Model: {model_name}",
+        xaxis_title="Month", yaxis_title="RawMaterialInventory",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.35, xanchor="left", x=0),
+        hovermode="x unified")
+    fig.update_xaxes(tickformat="%b'%y")
+    return fig
+
+
+# =============================================================================
+# UI RENDERING HELPERS
+# =============================================================================
+def render_methodology_flow():
+    """Visual methodology flow shown at the top of the application."""
+    stage1 = ["Historical EMS Data", "Data Preprocessing", "Feature Engineering", "Demand Pattern Analysis",
+              "CV-Based Statistical Demand Segmentation", "Machine Learning Predictive Modeling",
+              "Model Validation & Selection", "6-Month Raw Material Inventory Forecast"]
+    stage2 = ["Inventory Dynamics", "Warehouse Operational Requirement Estimation",
+              "Pallet / Bin Requirement", "Warehouse Capacity Requirement", "Contract Flexibility",
+              "Warehouse Cost Evaluation", "Warehouse Planning Decision"]
+
+    def chips(items, color):
+        arrow = " <span style='color:#7a8aa0'>&rarr;</span> "
+        return arrow.join(
+            f"<span style='background:{color};color:#fff;padding:4px 10px;border-radius:14px;"
+            f"display:inline-block;margin:3px 0;font-size:0.82rem'>{html.escape(t)}</span>"
+            for t in items)
+
+    st.markdown(
+        "<div style='line-height:2.1'>"
+        f"<b>STAGE 1 &mdash; Data Mining &amp; Predictive Forecasting</b><br>{chips(stage1, '#1F3A5F')}<br>"
+        "<span style='color:#B7791F;font-size:1.3rem'>&darr;</span> "
+        "<span style='background:#B7791F;color:#fff;padding:4px 12px;border-radius:14px;"
+        "font-size:0.82rem'>EXOGENOUS FORECAST INPUT</span><br>"
+        f"<b>STAGE 2 &mdash; Dynamic Warehouse Planning</b><br>{chips(stage2, '#0F7C8A')}"
+        "</div>", unsafe_allow_html=True)
+
+
+def render_methodology_notes():
+    with st.expander("Methodology notes", expanded=False):
+        st.markdown(
+            "- Data mining is used to discover patterns and develop predictive models from historical EMS operational data.\n"
+            "- CV-based statistical segmentation is used to characterize demand variability (statistical thresholds, not clustering).\n"
+            "- Machine learning models (XGBoost, LightGBM, CatBoost) are then evaluated for Raw Material Inventory prediction. "
+            "They are predictive modeling techniques *within* the broader data mining / predictive analytics stage.\n"
+            "- The selected predictive model generates a 6-Month Raw Material Inventory Forecast.\n"
+            "- The forecast is passed as an **Exogenous Forecast Input** into the Dynamic Warehouse Planning stage.\n"
+            "- The warehouse planning stage converts forecasted inventory into operational, capacity, and cost requirements. "
+            "It does not retrain or feed back into Stage 1, and it is a planning / evaluation model, not an optimization solver.")
+
+
+def render_sidebar():
+    st.sidebar.header("Stage 1 settings")
+    mode_label = st.sidebar.selectbox("Validation protocol", list(VALIDATION_MODES), index=0)
+    val_fraction = st.sidebar.slider(
+        "Validation share of pre-test data", 0.10, 0.40, DEFAULT_VALIDATION_FRACTION, 0.05,
+        help="Later part of the pre-test period (time-ordered, never shuffled).")
+    min_rows = st.sidebar.number_input(
+        "Minimum modelling rows before test period", min_value=6, max_value=60,
+        value=DEFAULT_MIN_PRETEST_ROWS, step=1,
+        help="ProfitCenters below the resulting minimum history are reported as 'Insufficient data'.")
+    st.sidebar.markdown("---")
+    st.sidebar.header("Stage 2 assumptions (fixed)")
+    st.sidebar.write(f"alpha = {ALPHA:.2f}, beta = {BETA:.2f}")
+    st.sidebar.write(f"Forecast horizon = {FORECAST_HORIZON} months")
+    st.sidebar.write(f"Final hold-out test = last {TEST_HORIZON} months")
+    return int(min_rows), float(val_fraction), VALIDATION_MODES[mode_label]
+
+
+def render_preprocessing(raw_df, clean_df, report):
+    st.info("**Primary forecasting target: RawMaterialInventory.** It directly affects warehouse utilization "
+            "and capacity requirements, so Stage 1 predicts it and Stage 2 translates it into operations.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows read", f"{report['rows_input']:,}")
+    c2.metric("Rows after cleaning", f"{report['rows_output']:,}")
+    c3.metric("Non-positive activity rows removed", f"{report['rows_inactive_removed']:,}")
+    c4.metric("Invalid-date rows dropped", f"{report['rows_invalid_date']:,}")
+    if report["missing_filled"]:
+        st.caption("Missing / non-numeric values filled with 0 (cells per column): "
+                   + ", ".join(f"{k}: {v}" for k, v in report["missing_filled"].items()))
+    st.markdown("**Data quality per ProfitCenter**")
+    show_df(report["quality_table"])
+    with st.expander("Raw data check per ProfitCenter"):
+        for pc in clean_df["ProfitCenter"].unique():
+            st.markdown(f"**{pc}**")
+            show_df(clean_df.loc[clean_df["ProfitCenter"] == pc, [
+                "Month", "RawMaterialInventory", "ProductionRevenue", "ReceivingTransaction",
+                "LocationTransferTransaction", "ShippingTransaction"]])
+
+
+def render_feature_engineering(feature_df):
+    st.markdown("**Leakage-free feature engineering** (computed per ProfitCenter)")
+    st.markdown(
+        "- `RM_Lag1`, `RM_Lag2`: previous 1 and 2 months of RawMaterialInventory\n"
+        "- `RM_MA3`, `RM_STD3`: `shift(1).rolling(3)` mean / std - the **current month is excluded**\n"
+        "- `RM_CV3 = RM_STD3 / RM_MA3`\n"
+        "- `Year`, `MonthNumber`, `Quarter`, `MonthSin`, `MonthCos` (cyclical month encoding)\n"
+        f"- First {FEATURE_WARMUP_ROWS} months of each ProfitCenter have no features (insufficient history) and are not used for modelling.")
+    with st.expander("Feature tables per ProfitCenter"):
+        for pc in feature_df["ProfitCenter"].unique():
+            st.markdown(f"**ProfitCenter: {pc}**")
+            show_df(round_df(feature_df[feature_df["ProfitCenter"] == pc]
+                             .drop(columns=["MonthDate"]), 4))
+
+
+def render_ml_modeling(stage1, min_pretest_rows, val_fraction, validation_mode):
+    st.markdown(
+        "XGBoost, LightGBM and CatBoost are the candidate **predictive modeling techniques** of the data-mining stage. "
+        "They *compete* per ProfitCenter on validation performance - the demand segment is **not** used to pick a model.")
+    status_rows = [{"Model": m, "Status": "Available", "Detail": ""} for m in stage1["available_models"]]
+    status_rows += [{"Model": m, "Status": "Not installed", "Detail": d}
+                    for m, d in stage1["unavailable_models"].items()]
+    show_df(pd.DataFrame(status_rows))
+
+    required = FEATURE_WARMUP_ROWS + TEST_HORIZON + min_pretest_rows
+    st.markdown(
+        f"**Predictors:** {', '.join(FEATURE_COLS)}.  \n"
+        "Operational variables (receiving, shipping, transfers, revenue, pallets, bins) are *not* predictors because "
+        "their future values are unknown at prediction time.")
+    st.markdown(
+        f"**Minimum-history rule:** a ProfitCenter needs at least **{required} months** "
+        f"({FEATURE_WARMUP_ROWS} feature warm-up + {TEST_HORIZON} final test + {min_pretest_rows} modelling months). "
+        "Shorter series are flagged below and receive **no** ML forecast (no fallback to other methods).  \n"
+        f"**Validation:** later {val_fraction:.0%} of pre-test rows (min {MIN_VALIDATION_ROWS}), time-ordered, "
+        f"protocol = *{'recursive multi-step' if validation_mode == 'recursive' else 'one-step-ahead'}*.")
+    st.markdown("**ProfitCenter coverage**")
+    show_df(stage1["coverage_df"])
+
+
+def render_validation_selection(stage1):
+    st.markdown("**Model comparison on the validation set** (selection: lowest MAE, RMSE as tie-breaker). "
+                "The final test set is not used here.")
+    val_df = stage1["validation_df"]
+    if val_df.empty:
+        st.warning("No validation results are available.")
+        return
+    show_df(round_df(val_df))
+    ok = val_df[val_df["Status"] == "OK"]
+    if not ok.empty:
+        fig = px.bar(ok, x="ProfitCenter", y="Validation_MAE", color="Model", barmode="group",
+                     title="Validation MAE by model and ProfitCenter")
+        show_chart(fig)
+
+    st.markdown("**Final test performance** (last 6 months, selected model only)")
+    if stage1["test_metrics_df"].empty:
+        st.warning("No test results are available.")
+    else:
+        show_df(round_df(stage1["test_metrics_df"]))
+    st.caption("MAPE ignores months with (near-)zero actuals; WMAPE = sum|error| / sum|actual| is the more stable measure.")
+
+    st.markdown("**Model summary**")
+    show_df(round_df(stage1["summary_df"]))
+
+
+def render_rm_forecast(stage1, hist_df, future_months):
+    fc = stage1["forecast_df"]
+    pivot = (fc.pivot(index="ProfitCenter", columns="Month", values="RM_Forecast")
+             .reindex(columns=future_months).round(0).reset_index())
+    st.markdown("**6-Month Raw Material Inventory Forecast** (Stage 1 output)")
+    show_df(pivot)
+
+    test_pred = stage1["test_pred_df"]
+    seg_model = fc.drop_duplicates("ProfitCenter").set_index("ProfitCenter")[["DemandSegment", "SelectedModel"]]
+    for i, pc in enumerate(seg_model.index):
+        hist = hist_df[hist_df["ProfitCenter"] == pc].sort_values("MonthDate")
+        tp = test_pred[test_pred["ProfitCenter"] == pc] if not test_pred.empty else None
+        future = fc[fc["ProfitCenter"] == pc].sort_values("MonthDate")
+        with st.expander(f"{pc}  |  {seg_model.loc[pc, 'DemandSegment']}  |  {seg_model.loc[pc, 'SelectedModel']}",
+                         expanded=(i < 3)):
+            show_chart(create_forecast_chart(pc, seg_model.loc[pc, "DemandSegment"],
+                                             seg_model.loc[pc, "SelectedModel"], hist, tp, future))
+
+    fig = px.line(fc, x="Month", y="RM_Forecast", color="ProfitCenter", markers=True,
+                  title="Raw Material Inventory Forecast", category_orders={"Month": future_months})
+    show_chart(fig)
+
+
+def render_capacity(forecast_df):
+    c1, c2, c3 = st.columns(3)
+    c1.metric("alpha - capacity flexibility / buffer", f"{ALPHA:.2f}")
+    c2.metric("beta - capacity reduction / adjustment factor", f"{BETA:.2f}")
+    c3.metric("Capacity multiplier (1 + alpha - beta)", f"{1 + ALPHA - BETA:.2f}")
+    st.code("warehouse_capacity = no_of_pallet * (1 + alpha - beta)")
+    cap = (forecast_df.groupby("ProfitCenter")
+           .agg(Avg_NoOfPallet=("NoOfPallet", "mean"),
+                Avg_WarehouseCapacity=("WarehouseCapacity", "mean"),
+                Peak_WarehouseCapacity=("WarehouseCapacity", "max"))
+           .reset_index())
+    show_df(round_df(cap, 0))
+    fig = px.line(forecast_df, x="Month", y="WarehouseCapacity", color="ProfitCenter", markers=True,
+                  title="Warehouse Capacity Requirement (pallets)",
+                  category_orders={"Month": forecast_df["Month"].drop_duplicates().tolist()})
+    show_chart(fig)
+
+
+def render_cost(forecast_df):
+    st.subheader("KPI Dashboard")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Warehouse Cost", f"{forecast_df['WarehouseCost'].sum():,.0f}")
+    c2.metric("Average Warehouse Capacity", f"{forecast_df['WarehouseCapacity'].mean():,.0f}")
+    c3.metric("Average Transaction", f"{forecast_df['TotalTransaction'].mean():,.0f}")
+
+    st.caption(
+        f"Cost assumptions (unchanged): holding = {HOLDING_COST_RATE} x RM inventory; "
+        f"shortage = {SHORTAGE_COST_RATE} x max(RM - next inventory, 0); "
+        f"capacity = {CAPACITY_COST_RATE} x warehouse capacity; transaction = {TRANSACTION_COST_RATE} x total transactions.")
+    components = ["HoldingCost", "ShortageCost", "CapacityCost", "TransactionCost"]
+    cost = forecast_df.groupby("ProfitCenter")[components + ["WarehouseCost"]].sum().reset_index()
+    show_df(round_df(cost, 0))
+    long = cost.melt(id_vars="ProfitCenter", value_vars=components, var_name="Component", value_name="Cost")
+    show_chart(px.bar(long, x="ProfitCenter", y="Cost", color="Component", barmode="stack",
+                      title="Warehouse Cost Evaluation (6-month total by component)"))
+
+
+# =============================================================================
+# MAIN APPLICATION
+# =============================================================================
+def run_app():
+    min_pretest_rows, val_fraction, validation_mode = render_sidebar()
+
+    # ---- 1. Upload -------------------------------------------------------------
+    st.header("1. Upload Dataset")
+    uploaded_file = st.file_uploader("Upload EMS Forecasting Dataset", type=["xlsx"])
+    if uploaded_file is None:
+        st.info("Upload an .xlsx file with columns: " + ", ".join(REQUIRED_COLS))
+        return
+    try:
+        raw_df = pd.read_excel(uploaded_file)
+    except Exception as exc:
+        st.error(f"Could not read the Excel file: {exc}")
+        return
+    st.subheader("Raw Dataset")
+    show_df(raw_df)
+
+    # ---- 2. Data preprocessing ---------------------------------------------------
+    st.header("2. Data Preprocessing")
+    try:
+        clean_df, report = preprocess_data(raw_df)
+    except DataError as exc:
+        st.error(str(exc))
+        return
+    show_messages(report["messages"])
+    render_preprocessing(raw_df, clean_df, report)
+
+    # ---- 3. Data mining & demand pattern analysis ----------------------------------
+    st.header("3. Data Mining & Demand Pattern Analysis")
+    feature_df = create_features(clean_df)
+    render_feature_engineering(feature_df)
+    pattern_df = analyze_demand_patterns(clean_df)
+    st.markdown("**Demand pattern analysis** (RawMaterialInventory per ProfitCenter)")
+    show_df(round_df(pattern_df))
+
+    # ---- 4. CV-based statistical demand segmentation ---------------------------------
+    st.header("4. CV-Based Statistical Demand Segmentation")
+    st.markdown(
+        "The Coefficient of Variation (CV = std / mean) characterizes demand / inventory variability **before** "
+        f"predictive modeling. Thresholds: **Stable** CV < {CV_STABLE_MAX:.2f}; **Moderate** "
+        f"{CV_STABLE_MAX:.2f} <= CV < {CV_VOLATILE_MIN:.2f}; **Volatile** CV >= {CV_VOLATILE_MIN:.2f}. "
+        "This is a statistical rule, not K-means or any other clustering algorithm.")
+    segmented_df = segment_customers(pattern_df)
+    st.subheader("Customer Demand Segmentation")
+    show_df(round_df(segmented_df))
+    segment_map = segmented_df.set_index("ProfitCenter")["DemandSegment"].to_dict()
+
+    # ---- Run Stage 1 ---------------------------------------------------------------
+    global_last_date = clean_df["MonthDate"].max()
+    future_months = [(global_last_date + pd.DateOffset(months=i + 1)).strftime(MONTH_LABEL_FORMAT)
+                     for i in range(FORECAST_HORIZON)]
+    with st.spinner("Running Stage 1: machine learning modeling, validation and forecasting..."):
+        stage1 = run_stage1_pipeline(feature_df, segmented_df, global_last_date,
+                                     min_pretest_rows, val_fraction, validation_mode)
+    show_messages(stage1["messages"])
+
+    # ---- 5. ML predictive modeling ---------------------------------------------------
+    st.header("5. Machine Learning Predictive Modeling")
+    render_ml_modeling(stage1, min_pretest_rows, val_fraction, validation_mode)
+
+    if stage1["forecast_df"].empty:
+        st.error("No forecast generated. See the ProfitCenter coverage table above for the reasons "
+                 "(missing ML libraries, insufficient history or training errors).")
+        return
+
+    # ---- 6. Validation & selection ---------------------------------------------------
+    st.header("6. Model Validation & Selection")
+    render_validation_selection(stage1)
+
+    # ---- 7. 6-month forecast --------------------------------------------------------
+    st.header("7. 6-Month Raw Material Inventory Forecast")
+    render_rm_forecast(stage1, clean_df, future_months)
+
+    # ---- 8. Stage 2 ------------------------------------------------------------------
+    st.header("8. Stage 2 - Dynamic Warehouse Planning")
+    st.markdown(
+        "The Stage 1 forecast enters Stage 2 as an **Exogenous Forecast Input**. Stage 2 does not retrain any model: "
+        "it converts forecasted RawMaterialInventory into receiving, shipping, transfer, pallet and bin requirements "
+        "using each ProfitCenter's historical operational ratios, then applies inventory dynamics, capacity and cost.")
+    forecast_df, ratios_df = run_stage2(clean_df, stage1["forecast_df"], segment_map, future_months)
+    if forecast_df.empty:
+        st.error("Stage 2 produced no output.")
+        return
+    st.markdown("**Historical operational ratios used by Stage 2**")
+    show_df(round_df(ratios_df, 4))
+    st.subheader("Forecast Dataset")
+    show_df(forecast_df.drop(columns=["MonthDate"]))
+
+    # ---- 9. Capacity -------------------------------------------------------------------
+    st.header("9. Warehouse Capacity Evaluation")
+    render_capacity(forecast_df)
+
+    # ---- 10. Cost ----------------------------------------------------------------------
+    st.header("10. Warehouse Cost Evaluation")
+    render_cost(forecast_df)
+
+    # ---- 11. Planning matrix -----------------------------------------------------------
+    st.header("11. Planning Matrix")
+    st.subheader("EMS Forecast Planning Matrix")
+    matrix_df = generate_planning_matrix(forecast_df, forecast_df["ProfitCenter"].unique())
+    show_df(matrix_df)
+
+    # ---- 12. Downloads -------------------------------------------------------------------
+    st.header("12. Downloads")
+    model_map = stage1["summary_df"].set_index("ProfitCenter")["SelectedModel"]
+    matrix_with_model = matrix_df.copy()
+    matrix_with_model.insert(2, "ForecastModel", matrix_with_model["ProfitCenter"].map(model_map))
+
+    downloads = [
+        ("Download Forecast Matrix CSV", matrix_with_model, "EMS_Forecast_Matrix.csv"),
+        ("Download Full Forecast Dataset CSV", forecast_df.drop(columns=["MonthDate"]), "EMS_Forecast_Full.csv"),
+        ("Download Demand Segmentation CSV", segmented_df, "EMS_Demand_Segmentation.csv"),
+        ("Download Validation Results CSV", stage1["validation_df"], "EMS_Model_Validation.csv"),
+        ("Download Test Performance CSV", stage1["test_metrics_df"], "EMS_Test_Performance.csv"),
+        ("Download Model Summary CSV", stage1["summary_df"], "EMS_Model_Summary.csv"),
+        ("Download Stage 1 RM Forecast CSV", stage1["forecast_df"].drop(columns=["MonthDate"]), "EMS_RM_Forecast_Stage1.csv"),
+        ("Download Test Predictions CSV", stage1["test_pred_df"].drop(columns=["MonthDate"], errors="ignore"), "EMS_Test_Predictions.csv"),
+    ]
+    cols = st.columns(2)
+    for i, (label, frame, fname) in enumerate(downloads):
+        with cols[i % 2]:
+            st.download_button(label=label, data=to_csv_bytes(frame), file_name=fname,
+                               mime="text/csv", key=f"dl_{i}")
+
+
+def main():
+    st.set_page_config(page_title="HCMIC EMS Planning System", layout="wide")
+    st.title(APP_TITLE)
+    st.write("Enterprise EMS Predictive Forecasting & Dynamic Warehouse Planning")
+    render_methodology_flow()
+    render_methodology_notes()
+    run_app()
+    st.markdown("---")
+    st.caption(APP_TITLE)
+
+
+if __name__ == "__main__":
+    main()
