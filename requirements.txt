@@ -3,5 +3,7 @@ pandas
 numpy
 plotly
 scikit-learn
-statsmodels
 openpyxl
+xgboost
+lightgbm
+catboost
