@@ -5,13 +5,21 @@ HCMIC EMS Data Mining & Warehouse Planning System
 
 Run with:   streamlit run hcmic_ems_warehouse_planning.py
 
-Required packages:
-    pip install streamlit pandas numpy plotly scikit-learn openpyxl
-    pip install xgboost lightgbm catboost      # candidate ML models
+Required packages (also suitable for requirements.txt):
+    streamlit
+    pandas
+    numpy
+    plotly
+    scikit-learn
+    openpyxl
+    xgboost
+    lightgbm
+    catboost
 
 Framework implemented
 ---------------------
 STAGE 1 - Data Mining & Predictive Forecasting
+    Fixed historical design: 17 months = 3 feature warm-up + 8 pre-test modelling + 6 final holdout
     Historical EMS Data -> Data Preprocessing -> Feature Engineering
     -> Demand Pattern Analysis -> CV-Based Statistical Demand Segmentation
     -> Machine Learning Predictive Modeling -> Model Validation & Selection
@@ -74,7 +82,8 @@ TEST_HORIZON = 6                           # final hold-out test: last 6 months
 DEFAULT_VALIDATION_FRACTION = 0.20         # later 20% of pre-test rows = validation
 MIN_VALIDATION_ROWS = 2
 MIN_TRAIN_FIT_ROWS = 4
-DEFAULT_MIN_PRETEST_ROWS = 8               # usable modelling rows required before the test period
+REQUIRED_HISTORY_MONTHS = 17               # fixed research design: 3 warm-up + 8 pre-test + 6 test
+PRETEST_MODELLING_ROWS = 8                  # usable modelling rows after the 3-month feature warm-up
 NEAR_ZERO_TOL = 1e-6                       # |actual| below this is excluded from MAPE / WMAPE
 EPS = 1e-9
 
@@ -176,18 +185,39 @@ def parse_month_column(series):
 
 
 def build_data_quality_table(df):
-    """Per-ProfitCenter history length, date span and gap diagnostics."""
+    """Per-ProfitCenter history length, date span, eligibility and gap diagnostics."""
     rows = []
     for pc, g in df.groupby("ProfitCenter", sort=True):
+        g = g.sort_values("MonthDate")
         first, last = g["MonthDate"].min(), g["MonthDate"].max()
         span = month_diff(last, first) + 1
+        zero_activity = bool((g["TotalActivity"] <= 0).all())
+        data_length = len(g)
+        missing_in_span = span - data_length
+
+        if zero_activity:
+            eligible = "No"
+            reason = "Zero activity"
+        elif data_length != REQUIRED_HISTORY_MONTHS:
+            eligible = "No"
+            reason = f"Insufficient / invalid history: exactly {REQUIRED_HISTORY_MONTHS} months required"
+        elif missing_in_span > 0:
+            eligible = "No"
+            reason = "Missing month(s) inside the historical span"
+        else:
+            eligible = "Yes"
+            reason = "Eligible"
+
         rows.append({
             "ProfitCenter": pc,
-            "DataLength": len(g),
+            "DataLength": data_length,
             "FirstMonth": first.strftime(MONTH_LABEL_FORMAT),
             "LastMonth": last.strftime(MONTH_LABEL_FORMAT),
-            "MissingMonthsInSpan": span - len(g),
+            "MissingMonthsInSpan": missing_in_span,
+            "ZeroActivity": zero_activity,
             "ConstantRMSeries": bool(g[TARGET].nunique() <= 1),
+            "MLEligible": eligible,
+            "Reason": reason,
         })
     return pd.DataFrame(rows)
 
@@ -196,11 +226,11 @@ def preprocess_data(raw_df):
     """
     Clean the uploaded dataset and build a monthly series per ProfitCenter.
 
-    Steps: validate columns -> clean ProfitCenter -> numeric conversion ->
-    fill missing numeric values with 0 -> parse Month -> merge duplicate
-    (ProfitCenter, Month) rows -> remove non-positive-activity rows -> sort.
+    Fixed research design: each ML-eligible ProfitCenter must contain exactly
+    17 consecutive historical months. Zero-activity ProfitCenters are retained
+    for data-quality reporting but excluded from ML forecasting.
 
-    Returns (clean_df, report). Raises DataError for fatal problems.
+    Returns (clean_df, report). Raises DataError for fatal input problems.
     """
     report = {"messages": []}
     df = raw_df.copy()
@@ -217,9 +247,9 @@ def preprocess_data(raw_df):
     df["ProfitCenter"] = (
         df["ProfitCenter"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
     )
-    bad_pc = df["ProfitCenter"].isna() | df["ProfitCenter"].isin(["", "nan", "None", "NaT", "<NA>"])
+    bad_pc = df["ProfitCenter"].isin(["", "nan", "None", "NaT", "<NA>"])
     report["rows_missing_profitcenter"] = int(bad_pc.sum())
-    df = df[~bad_pc]
+    df = df[~bad_pc].copy()
 
     # ---- Numeric conversion + missing values ----
     missing_filled = {}
@@ -234,17 +264,17 @@ def preprocess_data(raw_df):
         report["messages"].append((
             "warning",
             f"Missing / non-numeric values were replaced by 0 in: {missing_filled}. "
-            f"Check that a filled RawMaterialInventory value does not hide a true gap."))
+            "Check that a filled RawMaterialInventory value does not hide a true gap."))
 
     # ---- Month ----
     df["MonthDate"] = parse_month_column(df["Month"])
     if df["MonthDate"].isna().all():
-        raise DataError("Month format invalid. Use format like Mar'26")
+        raise DataError("Month format invalid. Use a valid monthly date such as Mar'26.")
     n_bad_dates = int(df["MonthDate"].isna().sum())
     report["rows_invalid_date"] = n_bad_dates
     if n_bad_dates:
         report["messages"].append(("warning", f"{n_bad_dates} row(s) with an invalid Month were dropped."))
-    df = df.dropna(subset=["MonthDate"])
+    df = df.dropna(subset=["MonthDate"]).copy()
 
     # ---- Duplicate (ProfitCenter, Month) rows ----
     dup_mask = df.duplicated(["ProfitCenter", "MonthDate"], keep=False)
@@ -257,30 +287,48 @@ def preprocess_data(raw_df):
 
     df["Month"] = df["MonthDate"].dt.strftime(MONTH_LABEL_FORMAT)
 
-    # ---- Remove invalid / non-positive activity rows ----
-    df["TotalActivity"] = df["RawMaterialInventory"] + df["ReceivingTransaction"] + df["ShippingTransaction"]
-    n_before = len(df)
-    df = df[df["TotalActivity"] > 0]
-    report["rows_inactive_removed"] = n_before - len(df)
-    if df.empty:
-        raise DataError("No valid rows remain after cleaning (all rows have non-positive activity).")
+    # ---- Activity flag: retain zero-activity ProfitCenters for reporting ----
+    df["TotalActivity"] = (
+        df["RawMaterialInventory"]
+        + df["ReceivingTransaction"]
+        + df["ShippingTransaction"]
+    )
+    df["ZeroActivity"] = df["TotalActivity"] <= 0
+
+    # IMPORTANT: do NOT delete zero-activity rows here.
+    report["rows_inactive_removed"] = 0
+    report["zero_activity_rows"] = int(df["ZeroActivity"].sum())
+    report["zero_activity_profitcenters"] = sorted(
+        df.loc[df["ZeroActivity"], "ProfitCenter"].unique().tolist()
+    )
+    if report["zero_activity_profitcenters"]:
+        report["messages"].append((
+            "warning",
+            "Zero-activity ProfitCenter(s) are retained in the data-quality report but excluded from ML forecasting: "
+            + ", ".join(report["zero_activity_profitcenters"])))
 
     df = df.sort_values(["ProfitCenter", "MonthDate"]).reset_index(drop=True)
     report["rows_output"] = len(df)
     report["quality_table"] = build_data_quality_table(df)
 
     q = report["quality_table"]
+    if (q["DataLength"] != REQUIRED_HISTORY_MONTHS).any():
+        bad = q.loc[q["DataLength"] != REQUIRED_HISTORY_MONTHS, ["ProfitCenter", "DataLength"]]
+        report["messages"].append((
+            "warning",
+            f"The application requires exactly {REQUIRED_HISTORY_MONTHS} historical months per ML-eligible ProfitCenter. "
+            f"Non-conforming ProfitCenters: {bad.to_dict('records')}"))
     if (q["MissingMonthsInSpan"] > 0).any():
         report["messages"].append((
             "warning",
-            "Some ProfitCenters have missing months inside their date span (see data-quality table). "
-            "Lag/rolling features are computed over the observed rows, so a gap shifts the lag window."))
+            "Some ProfitCenters have missing months inside their date span. "
+            "Those ProfitCenters are not eligible for ML forecasting."))
     if q["ConstantRMSeries"].any():
         report["messages"].append((
             "warning",
             "Constant RawMaterialInventory series detected for: "
             f"{q.loc[q['ConstantRMSeries'], 'ProfitCenter'].tolist()}. "
-            "ML models can only reproduce the constant level for these ProfitCenters."))
+            "Zero-activity series are excluded from ML; non-zero constant series remain eligible if they satisfy the 17-month rule."))
     return df, report
 
 
@@ -377,7 +425,7 @@ def analyze_demand_patterns(df):
         rm_mean = float(rm.mean())
         rm_std = float(rm.std()) if n >= 2 else np.nan
         if n < 2:
-            cv = np.nan                                  # CV undefined with a single observation
+            cv = np.nan
         else:
             cv = rm_std / rm_mean if rm_mean > EPS else 0.0
 
@@ -388,6 +436,10 @@ def analyze_demand_patterns(df):
             growth_pct = (last_v - first_v) / first_v * 100 if first_v != 0 else 0.0
             trend = classify_trend(growth_pct)
 
+        zero_activity = bool((g["TotalActivity"] <= 0).all())
+        if zero_activity:
+            trend = "Zero Activity"
+
         rows.append({
             "ProfitCenter": pc,
             "DataLength": n,
@@ -397,6 +449,8 @@ def analyze_demand_patterns(df):
             "RM_Min": float(rm.min()),
             "RM_Max": float(rm.max()),
             "ZeroRM_Months": int((rm <= 0).sum()),
+            "ZeroActivity": zero_activity,
+            "MLEligible": "No" if zero_activity else "Pending",
             "ReceivingTransaction_Mean": float(g["ReceivingTransaction"].mean()),
             "NoOfBin_Mean": float(g["NoOfBin"].mean()),
             "GrowthPercent": round(growth_pct, 2),
@@ -407,19 +461,20 @@ def analyze_demand_patterns(df):
 
 def segment_customers(pattern_df):
     """
-    CV-Based Statistical Demand Segmentation (statistical thresholds, NOT clustering):
-        Stable   : CV <  0.20
-        Moderate : 0.20 <= CV < 0.50
-        Volatile : CV >= 0.50
-    The segment characterises variability; it does not choose the model.
+    CV-Based Statistical Demand Segmentation (statistical thresholds, NOT clustering).
+    Zero-activity ProfitCenters are labelled separately and are not treated as Stable.
     """
     out = pattern_df.copy()
     out["DemandSegment"] = np.select(
-        [out["CV"].isna(), out["CV"] >= CV_VOLATILE_MIN, out["CV"] >= CV_STABLE_MAX],
-        ["Undetermined", "Volatile", "Moderate"],
+        [out["ZeroActivity"], out["CV"].isna(), out["CV"] >= CV_VOLATILE_MIN, out["CV"] >= CV_STABLE_MAX],
+        ["Zero Activity", "Undetermined", "Volatile", "Moderate"],
         default="Stable",
     )
-    out["DemandBehavior"] = out["DemandSegment"] + " variability, " + out["Trend"].str.lower() + " level"
+    out["DemandBehavior"] = np.where(
+        out["ZeroActivity"],
+        "Zero activity, excluded from ML",
+        out["DemandSegment"] + " variability, " + out["Trend"].str.lower() + " level",
+    )
     return out
 
 
@@ -560,16 +615,17 @@ def select_best_model(validation_rows):
 
 
 def forecast_profitcenter(pc, pc_df, segment, factories, global_last_date,
-                          min_pretest_rows, val_fraction, validation_mode):
+                          val_fraction, validation_mode):
     """
     Complete Stage 1 workflow for ONE ProfitCenter.
 
     1. chronological dataset with leakage-free features
     2. drop rows whose lag/rolling features are unavailable
     3. final hold-out TEST = last TEST_HORIZON months (never used for selection)
-    4. time-ordered train / validation split inside the pre-test data
-    5. validate XGBoost / LightGBM / CatBoost -> select by validation MAE (RMSE tie-break)
-    6. retrain the selected model on ALL pre-test rows -> recursive forecast of the test months
+    4. fixed 17-month design: 3 warm-up + 8 usable pre-test rows + 6 final test months
+    5. time-ordered train / validation split inside the pre-test data
+    6. validate XGBoost / LightGBM / CatBoost -> select by validation MAE (RMSE tie-break)
+    7. retrain the selected model on ALL pre-test rows -> recursive forecast of the test months
     7. evaluate on the test set (MAE, RMSE, MAPE, WMAPE)
     8. retrain the selected model on ALL history -> recursive forecast of the next 6 months
 
@@ -584,22 +640,24 @@ def forecast_profitcenter(pc, pc_df, segment, factories, global_last_date,
     }
     n = len(pc_df)
 
-    # ---- explicit minimum-data rule ----
-    required = FEATURE_WARMUP_ROWS + TEST_HORIZON + min_pretest_rows
-    if n < required:
-        res.update(Status="Insufficient data", Reason=(
-            f"{n} months available; {required} required "
-            f"({FEATURE_WARMUP_ROWS} feature warm-up + {TEST_HORIZON} test + {min_pretest_rows} modelling months). "
-            f"No ML forecast is produced."))
+    if bool((pc_df["TotalActivity"] <= 0).all()):
+        res.update(Status="Zero activity", Reason="Zero activity ProfitCenter is retained for reporting but excluded from ML forecasting.")
         return res
 
-    # ---- chronological split: pre-test | final test ----
+    # ---- fixed 17-month research design ----
+    if n != REQUIRED_HISTORY_MONTHS:
+        res.update(Status="Insufficient data", Reason=(
+            f"{n} months available; exactly {REQUIRED_HISTORY_MONTHS} consecutive months are required "
+            f"({FEATURE_WARMUP_ROWS} feature warm-up + {PRETEST_MODELLING_ROWS} pre-test modelling rows + {TEST_HORIZON} final test months)."))
+        return res
+
+    # ---- chronological split: 8 usable pre-test rows | final 6-month test ----
     test_start = n - TEST_HORIZON
     model_rows = pc_df.iloc[:test_start].dropna(subset=FEATURE_COLS)
-    if len(model_rows) < min_pretest_rows:
+    if len(model_rows) != PRETEST_MODELLING_ROWS:
         res.update(Status="Insufficient data", Reason=(
-            f"Only {len(model_rows)} pre-test rows have complete lag/rolling features "
-            f"(minimum {min_pretest_rows})."))
+            f"Expected exactly {PRETEST_MODELLING_ROWS} usable pre-test modelling rows after the "
+            f"{FEATURE_WARMUP_ROWS}-month feature warm-up, but found {len(model_rows)}."))
         return res
 
     n_val = max(MIN_VALIDATION_ROWS, int(math.ceil(len(model_rows) * val_fraction)))
@@ -669,7 +727,7 @@ def forecast_profitcenter(pc, pc_df, segment, factories, global_last_date,
 
 @st.cache_data(show_spinner=False)
 def run_stage1_pipeline(feature_df, segmented_df, global_last_date,
-                        min_pretest_rows, val_fraction, validation_mode):
+                        val_fraction, validation_mode):
     """
     Run Stage 1 for every ProfitCenter and assemble the result tables.
     (No Streamlit calls in here, so the cached result can be replayed safely.)
@@ -698,8 +756,18 @@ def run_stage1_pipeline(feature_df, segmented_df, global_last_date,
         g = g.sort_values("MonthDate").reset_index(drop=True)
         segment = segment_map.get(pc, "Undetermined")
         try:
-            res = forecast_profitcenter(pc, g, segment, factories, global_last_date,
-                                        min_pretest_rows, val_fraction, validation_mode)
+            if bool((g["TotalActivity"] <= 0).all()):
+                res = {
+                    "ProfitCenter": pc, "DataLength": len(g), "DemandSegment": "Zero Activity",
+                    "Status": "Zero activity",
+                    "Reason": "Zero activity ProfitCenter retained for data-quality reporting; excluded from ML.",
+                    "Notes": [], "SelectedModel": None, "ValidationRows": [],
+                    "TestMetrics": None, "TestPredictions": None, "Forecast": None,
+                    "TrainRows": 0, "ValRows": 0
+                }
+            else:
+                res = forecast_profitcenter(pc, g, segment, factories, global_last_date,
+                                            val_fraction, validation_mode)
         except Exception as exc:                                # last-resort guard: never crash the app
             res = {"ProfitCenter": pc, "DataLength": len(g), "DemandSegment": segment,
                    "Status": "Training failed", "Reason": f"Unexpected error: {type(exc).__name__}: {exc}",
@@ -994,18 +1062,20 @@ def render_sidebar():
     st.sidebar.header("Stage 1 settings")
     mode_label = st.sidebar.selectbox("Validation protocol", list(VALIDATION_MODES), index=0)
     val_fraction = st.sidebar.slider(
-        "Validation share of pre-test data", 0.10, 0.40, DEFAULT_VALIDATION_FRACTION, 0.05,
-        help="Later part of the pre-test period (time-ordered, never shuffled).")
-    min_rows = st.sidebar.number_input(
-        "Minimum modelling rows before test period", min_value=6, max_value=60,
-        value=DEFAULT_MIN_PRETEST_ROWS, step=1,
-        help="ProfitCenters below the resulting minimum history are reported as 'Insufficient data'.")
+        "Validation share of the 8-row pre-test period", 0.10, 0.40, DEFAULT_VALIDATION_FRACTION, 0.05,
+        help="Chronological validation within the fixed 8 usable pre-test modelling rows. No shuffling.")
+    st.sidebar.markdown("---")
+    st.sidebar.header("Fixed research design")
+    st.sidebar.write(f"Historical data required = {REQUIRED_HISTORY_MONTHS} months")
+    st.sidebar.write(f"Feature warm-up = {FEATURE_WARMUP_ROWS} months")
+    st.sidebar.write(f"Pre-test modelling period = {PRETEST_MODELLING_ROWS} usable rows")
+    st.sidebar.write(f"Final hold-out test = {TEST_HORIZON} months")
+    st.sidebar.write(f"Future forecast = {FORECAST_HORIZON} months")
     st.sidebar.markdown("---")
     st.sidebar.header("Stage 2 assumptions (fixed)")
     st.sidebar.write(f"alpha = {ALPHA:.2f}, beta = {BETA:.2f}")
-    st.sidebar.write(f"Forecast horizon = {FORECAST_HORIZON} months")
-    st.sidebar.write(f"Final hold-out test = last {TEST_HORIZON} months")
-    return int(min_rows), float(val_fraction), VALIDATION_MODES[mode_label]
+    st.sidebar.write(f"Capacity multiplier = {1 + ALPHA - BETA:.2f}")
+    return float(val_fraction), VALIDATION_MODES[mode_label]
 
 
 def render_preprocessing(raw_df, clean_df, report):
@@ -1014,12 +1084,16 @@ def render_preprocessing(raw_df, clean_df, report):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rows read", f"{report['rows_input']:,}")
     c2.metric("Rows after cleaning", f"{report['rows_output']:,}")
-    c3.metric("Non-positive activity rows removed", f"{report['rows_inactive_removed']:,}")
+    c3.metric("Zero-activity rows retained", f"{report.get('zero_activity_rows', 0):,}")
     c4.metric("Invalid-date rows dropped", f"{report['rows_invalid_date']:,}")
     if report["missing_filled"]:
         st.caption("Missing / non-numeric values filled with 0 (cells per column): "
                    + ", ".join(f"{k}: {v}" for k, v in report["missing_filled"].items()))
     st.markdown("**Data quality per ProfitCenter**")
+    st.caption(
+        f"ML eligibility requires exactly {REQUIRED_HISTORY_MONTHS} consecutive months, "
+        f"with {FEATURE_WARMUP_ROWS} warm-up months + {PRETEST_MODELLING_ROWS} pre-test modelling rows + {TEST_HORIZON} holdout months. "
+        "Zero-activity ProfitCenters are retained here but excluded from ML.")
     show_df(report["quality_table"])
     with st.expander("Raw data check per ProfitCenter"):
         for pc in clean_df["ProfitCenter"].unique():
@@ -1044,7 +1118,7 @@ def render_feature_engineering(feature_df):
                              .drop(columns=["MonthDate"]), 4))
 
 
-def render_ml_modeling(stage1, min_pretest_rows, val_fraction, validation_mode):
+def render_ml_modeling(stage1, val_fraction, validation_mode):
     st.markdown(
         "XGBoost, LightGBM and CatBoost are the candidate **predictive modeling techniques** of the data-mining stage. "
         "They *compete* per ProfitCenter on validation performance - the demand segment is **not** used to pick a model.")
@@ -1053,17 +1127,16 @@ def render_ml_modeling(stage1, min_pretest_rows, val_fraction, validation_mode):
                     for m, d in stage1["unavailable_models"].items()]
     show_df(pd.DataFrame(status_rows))
 
-    required = FEATURE_WARMUP_ROWS + TEST_HORIZON + min_pretest_rows
     st.markdown(
         f"**Predictors:** {', '.join(FEATURE_COLS)}.  \n"
         "Operational variables (receiving, shipping, transfers, revenue, pallets, bins) are *not* predictors because "
         "their future values are unknown at prediction time.")
     st.markdown(
-        f"**Minimum-history rule:** a ProfitCenter needs at least **{required} months** "
-        f"({FEATURE_WARMUP_ROWS} feature warm-up + {TEST_HORIZON} final test + {min_pretest_rows} modelling months). "
-        "Shorter series are flagged below and receive **no** ML forecast (no fallback to other methods).  \n"
-        f"**Validation:** later {val_fraction:.0%} of pre-test rows (min {MIN_VALIDATION_ROWS}), time-ordered, "
-        f"protocol = *{'recursive multi-step' if validation_mode == 'recursive' else 'one-step-ahead'}*.")
+        f"**Fixed history rule:** exactly **{REQUIRED_HISTORY_MONTHS} consecutive months** are required per ML-eligible ProfitCenter: "
+        f"{FEATURE_WARMUP_ROWS} feature warm-up + {PRETEST_MODELLING_ROWS} usable pre-test modelling rows + {TEST_HORIZON} final test months. "
+        "Shorter, longer, gapped, or zero-activity series are excluded from ML and clearly reported.  \n"
+        f"**Validation:** later {val_fraction:.0%} of the {PRETEST_MODELLING_ROWS}-row pre-test modelling period (minimum {MIN_VALIDATION_ROWS}), "
+        f"time-ordered, protocol = *{'recursive multi-step' if validation_mode == 'recursive' else 'one-step-ahead'}*.")
     st.markdown("**ProfitCenter coverage**")
     show_df(stage1["coverage_df"])
 
@@ -1121,7 +1194,10 @@ def render_capacity(forecast_df):
     c1.metric("alpha - capacity flexibility / buffer", f"{ALPHA:.2f}")
     c2.metric("beta - capacity reduction / adjustment factor", f"{BETA:.2f}")
     c3.metric("Capacity multiplier (1 + alpha - beta)", f"{1 + ALPHA - BETA:.2f}")
-    st.code("warehouse_capacity = no_of_pallet * (1 + alpha - beta)")
+    st.code(
+        "NoOfBin = RawMaterialInventory_forecast * BinRatio\n"
+        "warehouse_capacity = no_of_pallet * (1 + alpha - beta)"
+    )
     cap = (forecast_df.groupby("ProfitCenter")
            .agg(Avg_NoOfPallet=("NoOfPallet", "mean"),
                 Avg_WarehouseCapacity=("WarehouseCapacity", "mean"),
@@ -1157,13 +1233,15 @@ def render_cost(forecast_df):
 # MAIN APPLICATION
 # =============================================================================
 def run_app():
-    min_pretest_rows, val_fraction, validation_mode = render_sidebar()
+    val_fraction, validation_mode = render_sidebar()
 
     # ---- 1. Upload -------------------------------------------------------------
     st.header("1. Upload Dataset")
     uploaded_file = st.file_uploader("Upload EMS Forecasting Dataset", type=["xlsx"])
     if uploaded_file is None:
-        st.info("Upload an .xlsx file with columns: " + ", ".join(REQUIRED_COLS))
+        st.info(
+            f"Upload an .xlsx file with the required columns and exactly {REQUIRED_HISTORY_MONTHS} consecutive historical months per valid ProfitCenter."
+        )
         return
     try:
         raw_df = pd.read_excel(uploaded_file)
@@ -1209,12 +1287,12 @@ def run_app():
                      for i in range(FORECAST_HORIZON)]
     with st.spinner("Running Stage 1: machine learning modeling, validation and forecasting..."):
         stage1 = run_stage1_pipeline(feature_df, segmented_df, global_last_date,
-                                     min_pretest_rows, val_fraction, validation_mode)
+                                     val_fraction, validation_mode)
     show_messages(stage1["messages"])
 
     # ---- 5. ML predictive modeling ---------------------------------------------------
     st.header("5. Machine Learning Predictive Modeling")
-    render_ml_modeling(stage1, min_pretest_rows, val_fraction, validation_mode)
+    render_ml_modeling(stage1, val_fraction, validation_mode)
 
     if stage1["forecast_df"].empty:
         st.error("No forecast generated. See the ProfitCenter coverage table above for the reasons "
