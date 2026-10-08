@@ -1281,17 +1281,35 @@ def run_app():
     show_df(round_df(segmented_df))
     segment_map = segmented_df.set_index("ProfitCenter")["DemandSegment"].to_dict()
 
-    # ---- Run Stage 1 ---------------------------------------------------------------
+    st.success(
+        f"CV-based statistical demand segmentation completed successfully for "
+        f"{segmented_df['ProfitCenter'].nunique()} ProfitCenter(s)."
+    )
+
+    # ---- 5. ML predictive modeling ---------------------------------------------------
+    # IMPORTANT: Stage 1 ML is intentionally executed INSIDE Step 5.
+    # This prevents ML dependency/training errors from appearing to be Step 4 errors.
+    st.header("5. Machine Learning Predictive Modeling")
+    st.info(
+        "Stage 5 uses XGBoost, LightGBM and CatBoost to forecast "
+        "RawMaterialInventory. The demand segment from Step 4 describes "
+        "variability only and does not determine the selected ML model."
+    )
+
     global_last_date = clean_df["MonthDate"].max()
     future_months = [(global_last_date + pd.DateOffset(months=i + 1)).strftime(MONTH_LABEL_FORMAT)
                      for i in range(FORECAST_HORIZON)]
-    with st.spinner("Running Stage 1: machine learning modeling, validation and forecasting..."):
-        stage1 = run_stage1_pipeline(feature_df, segmented_df, global_last_date,
-                                     val_fraction, validation_mode)
-    show_messages(stage1["messages"])
 
-    # ---- 5. ML predictive modeling ---------------------------------------------------
-    st.header("5. Machine Learning Predictive Modeling")
+    with st.spinner("Step 5: checking ML libraries, training candidate models, validating and forecasting..."):
+        stage1 = run_stage1_pipeline(
+            feature_df,
+            segmented_df,
+            global_last_date,
+            val_fraction,
+            validation_mode,
+        )
+
+    show_messages(stage1["messages"])
     render_ml_modeling(stage1, val_fraction, validation_mode)
 
     if stage1["forecast_df"].empty:
